@@ -1,0 +1,252 @@
+"""State management for download queue persistence."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+from .config import Config
+
+
+class DownloadStatus(str, Enum):
+    """Status of a download item."""
+
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PAUSED = "paused"
+
+
+@dataclass
+class DownloadItem:
+    """Represents a single download item."""
+
+    path: str
+    url: str
+    local_path: str
+    status: DownloadStatus = DownloadStatus.QUEUED
+    progress: float = 0.0
+    total_size: int = 0
+    downloaded_size: int = 0
+    speed: float = 0.0
+    eta: float = 0.0
+    error: str = ""
+    retries: int = 0
+    added_at: float = field(default_factory=time.time)
+    started_at: float = 0.0
+    completed_at: float = 0.0
+    expanded_from: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DownloadItem:
+        """Create from dictionary."""
+        data = data.copy()
+        data["status"] = DownloadStatus(data.get("status", "queued"))
+        return cls(**data)
+
+
+@dataclass
+class QueueState:
+    """State of the download queue."""
+
+    items: dict[str, DownloadItem] = field(default_factory=dict)
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "version": self.version,
+            "items": {path: item.to_dict() for path, item in self.items.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QueueState:
+        """Create from dictionary."""
+        items = {}
+        for path, item_data in data.get("items", {}).items():
+            items[path] = DownloadItem.from_dict(item_data)
+        return cls(items=items, version=data.get("version", 1))
+
+
+class StateManager:
+    """Manages persistent state for download queue."""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.state = QueueState()
+        self._lock = Lock()
+        self._dirty = False
+
+    def load(self) -> None:
+        """Load state from file."""
+        state_path = self.config.get_state_path()
+        if not state_path.exists():
+            return
+
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                data = json.load(f)
+            with self._lock:
+                self.state = QueueState.from_dict(data)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self.state = QueueState()
+
+    def save(self, force: bool = False) -> None:
+        """Save state to file."""
+        if not force and not self._dirty:
+            return
+
+        state_path = self.config.get_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            data = self.state.to_dict()
+            self._dirty = False
+
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def add_item(self, item: DownloadItem) -> None:
+        """Add item to queue."""
+        with self._lock:
+            self.state.items[item.path] = item
+            self._dirty = True
+
+    def remove_item(self, path: str) -> None:
+        """Remove item from queue."""
+        with self._lock:
+            if path in self.state.items:
+                del self.state.items[path]
+                self._dirty = True
+
+    def update_item(self, path: str, **kwargs: Any) -> None:
+        """Update item properties."""
+        with self._lock:
+            if path in self.state.items:
+                item = self.state.items[path]
+                for key, value in kwargs.items():
+                    if hasattr(item, key):
+                        setattr(item, key, value)
+                self._dirty = True
+
+    def get_item(self, path: str) -> DownloadItem | None:
+        """Get item by path."""
+        with self._lock:
+            return self.state.items.get(path)
+
+    def get_items_by_status(self, status: DownloadStatus) -> list[DownloadItem]:
+        """Get all items with given status."""
+        with self._lock:
+            return [item for item in self.state.items.values() if item.status == status]
+
+    def get_queued_items(self) -> list[DownloadItem]:
+        """Get all queued items."""
+        return self.get_items_by_status(DownloadStatus.QUEUED)
+
+    def get_downloading_items(self) -> list[DownloadItem]:
+        """Get all currently downloading items."""
+        return self.get_items_by_status(DownloadStatus.DOWNLOADING)
+
+    def get_completed_items(self) -> list[DownloadItem]:
+        """Get all completed items."""
+        return self.get_items_by_status(DownloadStatus.COMPLETED)
+
+    def get_failed_items(self) -> list[DownloadItem]:
+        """Get all failed items."""
+        return self.get_items_by_status(DownloadStatus.FAILED)
+
+    def get_all_items(self) -> list[DownloadItem]:
+        """Get all items."""
+        with self._lock:
+            return list(self.state.items.values())
+
+    def clear_completed(self) -> int:
+        """Remove all completed items. Returns count removed."""
+        with self._lock:
+            to_remove = [
+                path for path, item in self.state.items.items()
+                if item.status == DownloadStatus.COMPLETED
+            ]
+            for path in to_remove:
+                del self.state.items[path]
+            if to_remove:
+                self._dirty = True
+            return len(to_remove)
+
+    def clear_failed(self) -> int:
+        """Remove all failed items. Returns count removed."""
+        with self._lock:
+            to_remove = [
+                path for path, item in self.state.items.items()
+                if item.status == DownloadStatus.FAILED
+            ]
+            for path in to_remove:
+                del self.state.items[path]
+            if to_remove:
+                self._dirty = True
+            return len(to_remove)
+
+    def retry_failed(self) -> int:
+        """Reset failed items to queued. Returns count reset."""
+        with self._lock:
+            count = 0
+            for item in self.state.items.values():
+                if item.status == DownloadStatus.FAILED:
+                    item.status = DownloadStatus.QUEUED
+                    item.error = ""
+                    item.retries = 0
+                    count += 1
+            if count > 0:
+                self._dirty = True
+            return count
+
+    def clear_all(self) -> int:
+        """Clear all items from queue. Returns count removed."""
+        with self._lock:
+            count = len(self.state.items)
+            self.state.items.clear()
+            if count > 0:
+                self._dirty = True
+            return count
+
+    def get_stats(self) -> dict[str, int]:
+        """Get queue statistics."""
+        with self._lock:
+            stats = {
+                "total": len(self.state.items),
+                "queued": 0,
+                "downloading": 0,
+                "completed": 0,
+                "failed": 0,
+                "paused": 0,
+            }
+            for item in self.state.items.values():
+                stats[item.status.value] += 1
+            return stats
+
+    @property
+    def is_empty(self) -> bool:
+        """Check if queue is empty."""
+        with self._lock:
+            return len(self.state.items) == 0
+
+    @property
+    def has_pending(self) -> bool:
+        """Check if there are pending downloads."""
+        with self._lock:
+            return any(
+                item.status in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING)
+                for item in self.state.items.values()
+            )

@@ -1,0 +1,63 @@
+[project]
+name = "myrient-browser"
+version = "1.0.0"
+description = "CLI tool for browsing and downloading files from HTTP repository based on local path index"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "User"}
+]
+keywords = ["cli", "tui", "downloader", "browser", "http"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Utilities",
+]
+
+dependencies = [
+    "textual>=0.47.0",
+    "httpx[http2]>=0.27.0",
+    "tomli>=2.0.1",
+    "rapidfuzz>=3.6.0",
+    "rich>=13.7.0",
+    "click>=8.1.0",
+    "aiofiles>=23.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+myrient = "myrient_browser.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myrient_browser"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
