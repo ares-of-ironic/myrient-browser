@@ -954,16 +954,23 @@ class MyrientBrowser(App):
             if selected_size >= 0:
                 selected_size_str = f" ({format_size(selected_size)})"
 
-        # Current folder info
+        # Current view total size (sum of all visible items)
         current_folder_info = ""
-        if self.index and self.index.has_sizes:
+        if self.index and self.index.has_sizes and self.current_items:
+            view_total = 0
+            for node in self.current_items:
+                if node.is_dir:
+                    dir_size = self.index.get_dir_size(node.path)
+                    if dir_size >= 0:
+                        view_total += dir_size
+                elif node.size >= 0:
+                    view_total += node.size
+            
             if self.current_path:
-                folder_size = self.index.get_dir_size(self.current_path)
                 folder_name = self.current_path.split("/")[-1] if "/" in self.current_path else self.current_path
-                if folder_size >= 0:
-                    current_folder_info = f"\n[bold]Current:[/bold] {folder_name} ({format_size(folder_size)})"
-            elif self.index.total_size >= 0:
-                current_folder_info = f"\n[bold]Total size:[/bold] {format_size(self.index.total_size)}"
+                current_folder_info = f"\n[bold]View total:[/bold] {format_size(view_total)} ({len(self.current_items)} items)"
+            else:
+                current_folder_info = f"\n[bold]View total:[/bold] {format_size(view_total)} ({len(self.current_items)} items)"
 
         stats = f"""[bold]Index:[/bold] {index_info}
 [bold]Selected:[/bold] {selected_count}{selected_size_str}{current_folder_info}
