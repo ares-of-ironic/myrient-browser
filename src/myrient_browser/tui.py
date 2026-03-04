@@ -23,7 +23,7 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    ProgressBar,
+    LoadingIndicator,
     Static,
     Switch,
     TabbedContent,
@@ -168,8 +168,8 @@ class LoadingScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Container(id="loading-dialog"):
             yield Static("[bold cyan]Myrient Browser[/bold cyan]", id="loading-title")
-            yield Static("", id="loading-message")
-            yield ProgressBar(id="loading-progress", show_eta=False)
+            yield LoadingIndicator(id="loading-indicator")
+            yield Static("Loading index...", id="loading-message")
 
     def update_message(self, message: str) -> None:
         """Update loading message."""
@@ -179,11 +179,8 @@ class LoadingScreen(ModalScreen[None]):
             pass
 
     def set_progress(self, progress: float) -> None:
-        """Set progress bar value (0-100)."""
-        try:
-            self.query_one("#loading-progress", ProgressBar).update(progress=progress)
-        except Exception:
-            pass
+        """No-op - progress bar removed, use update_message instead."""
+        pass
 
 
 class HelpScreen(ModalScreen[None]):
@@ -624,8 +621,9 @@ class MyrientBrowser(App):
         color: $text-muted;
     }
 
-    #loading-progress {
+    #loading-indicator {
         width: 100%;
+        height: 1;
         margin-top: 1;
     }
 
