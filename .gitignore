@@ -50,3 +50,4 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+docs/GITHUB_GUIDE.md
