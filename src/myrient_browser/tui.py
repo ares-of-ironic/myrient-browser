@@ -201,6 +201,7 @@ class HelpScreen(ModalScreen[None]):
 [bold]Navigation (Browser tab):[/bold]
   [yellow]Enter[/yellow]      Enter directory
   [yellow]Backspace[/yellow]  Go back / parent directory
+  [yellow]g[/yellow]          Go to folder containing highlighted item
   [yellow]/[/yellow]          Focus search input
   [yellow]Escape[/yellow]     Clear search, go to root
 
@@ -731,6 +732,7 @@ class MyrientBrowser(App):
         Binding("r", "reload_index", "Reload", show=False),
         Binding("backspace", "go_back", "Back", show=False),
         Binding("m", "toggle_missing", "Missing", show=False),
+        Binding("g", "go_to_parent", "Go to folder", show=False),
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("x", "remove_download", "Remove", show=False),
@@ -1201,6 +1203,36 @@ class MyrientBrowser(App):
             parts = self.current_path.split("/")
             self.current_path = "/".join(parts[:-1])
             self.refresh_list()
+
+    def action_go_to_parent(self) -> None:
+        """Go to parent folder of highlighted item."""
+        if not self._is_browser_tab():
+            return
+        
+        list_view = self.query_one("#file-list", ListView)
+        if not list_view.highlighted_child or not isinstance(list_view.highlighted_child, PathItem):
+            return
+        
+        node = list_view.highlighted_child.node
+        target_name = node.name
+        
+        # Get parent path
+        if "/" in node.path:
+            parent_path = node.path.rsplit("/", 1)[0]
+        else:
+            parent_path = ""
+        
+        # Clear search and navigate to parent
+        self.search_query = ""
+        self.query_one("#search-input", Input).value = ""
+        self.current_path = parent_path
+        self.refresh_list()
+        
+        # Find and highlight the target item
+        for idx, item in enumerate(self.current_items):
+            if item.name == target_name:
+                list_view.index = idx
+                break
 
     def action_add_to_queue(self) -> None:
         """Add selected or highlighted item to download queue."""
