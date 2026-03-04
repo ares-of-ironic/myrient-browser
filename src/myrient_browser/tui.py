@@ -1224,15 +1224,26 @@ class MyrientBrowser(App):
         
         # Clear search and navigate to parent
         self.search_query = ""
-        self.query_one("#search-input", Input).value = ""
+        try:
+            self.query_one("#search-input", Input).value = ""
+        except Exception:
+            pass
         self.current_path = parent_path
         self.refresh_list()
         
-        # Find and highlight the target item
-        for idx, item in enumerate(self.current_items):
-            if item.name == target_name:
-                list_view.index = idx
-                break
+        # Find and highlight the target item after refresh
+        self.call_later(self._highlight_item, target_name)
+
+    def _highlight_item(self, target_name: str) -> None:
+        """Highlight item by name in current list."""
+        try:
+            list_view = self.query_one("#file-list", ListView)
+            for idx, item in enumerate(self.current_items):
+                if item.name == target_name:
+                    list_view.index = idx
+                    break
+        except Exception:
+            pass
 
     def action_add_to_queue(self) -> None:
         """Add selected or highlighted item to download queue."""
