@@ -61,7 +61,8 @@ class PathItem(ListItem):
         self.download_status = download_status
         
         icon = "📁 " if node.is_dir else "📄 "
-        name = node.name
+        # Escape square brackets to prevent Rich markup interpretation
+        name = node.name.replace("[", "\\[")
 
         if selected:
             check = "✓ "
@@ -74,9 +75,9 @@ class PathItem(ListItem):
             size_str = f" [dim]({format_size(size)})[/]"
 
         if download_status == "DOWNLOADED":
-            label_text = f"{icon}{check}[dim green]{name}[/]{size_str} [green][DOWNLOADED][/]"
+            label_text = f"{icon}{check}[dim green]{name}[/]{size_str} [green]\\[DOWNLOADED][/]"
         elif download_status == "PARTIAL":
-            label_text = f"{icon}{check}[yellow]{name}{size_str} [PARTIAL][/]"
+            label_text = f"{icon}{check}[yellow]{name}{size_str} \\[PARTIAL][/]"
         else:
             label_text = f"{icon}{check}{name}{size_str}"
 
@@ -105,10 +106,15 @@ class InfoPanel(Static):
             "MISSING": "[dim]NOT DOWNLOADED[/dim]",
         }.get(status, status)
 
-        info = f"""[bold]Path:[/bold] {node.path}
+        # Escape square brackets in paths to prevent Rich markup interpretation
+        escaped_path = node.path.replace("[", "\\[")
+        escaped_url = config.build_url(node.path).replace("[", "\\[")
+        escaped_local = str(config.get_local_path(node.path)).replace("[", "\\[")
+        
+        info = f"""[bold]Path:[/bold] {escaped_path}
 [bold]Type:[/bold] {"Directory" if node.is_dir else "File"}
-[bold]URL:[/bold] {config.build_url(node.path)}
-[bold]Local:[/bold] {config.get_local_path(node.path)}
+[bold]URL:[/bold] {escaped_url}
+[bold]Local:[/bold] {escaped_local}
 [bold]Status:[/bold] {status_style}"""
 
         if node.is_dir:
@@ -134,10 +140,16 @@ class InfoPanel(Static):
             DownloadStatus.PAUSED: "[yellow]PAUSED[/yellow]",
         }.get(item.status, str(item.status))
 
-        info = f"""[bold]File:[/bold] {Path(item.path).name}
-[bold]Path:[/bold] {item.path}
-[bold]URL:[/bold] {item.url}
-[bold]Local:[/bold] {item.local_path}
+        # Escape square brackets in paths to prevent Rich markup interpretation
+        escaped_name = Path(item.path).name.replace("[", "\\[")
+        escaped_path = item.path.replace("[", "\\[")
+        escaped_url = item.url.replace("[", "\\[")
+        escaped_local = item.local_path.replace("[", "\\[")
+        
+        info = f"""[bold]File:[/bold] {escaped_name}
+[bold]Path:[/bold] {escaped_path}
+[bold]URL:[/bold] {escaped_url}
+[bold]Local:[/bold] {escaped_local}
 [bold]Status:[/bold] {status_style}"""
 
         if item.total_size > 0:
@@ -426,7 +438,7 @@ class DownloadPanel(Static):
                 DownloadStatus.PAUSED: "[yellow]Paused[/yellow]",
             }.get(item.status, str(item.status))
 
-            name = Path(item.path).name
+            name = Path(item.path).name.replace("[", "\\[")
             if len(name) > 30:
                 name = name[:27] + "..."
 
