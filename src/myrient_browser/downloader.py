@@ -151,23 +151,33 @@ class DownloadManager:
         return added
 
     async def _process_queue(self) -> None:
-        """Process queued downloads."""
+        """Process queued downloads using a slot-based approach.
+
+        Only fills available concurrency slots with the highest-priority items.
+        This ensures promoted (high-priority) items are started as soon as a
+        slot frees up, without creating tasks for all 20k+ queued items at once.
+        """
         while self._running:
-            queued = self.state.get_queued_items()
-            if not queued:
+            active = len(self._tasks)
+            available_slots = self.config.download.concurrency - active
+
+            if available_slots > 0:
+                # get_queued_items() returns items sorted by (priority, added_at)
+                queued = self.state.get_queued_items()
+                started = 0
+                for item in queued:
+                    if started >= available_slots:
+                        break
+                    if not self._running:
+                        break
+                    if item.path in self._tasks:
+                        continue
+                    task = asyncio.create_task(self._download_with_semaphore(item))
+                    self._tasks[item.path] = task
+                    started += 1
+                await asyncio.sleep(0.1)
+            else:
                 await asyncio.sleep(0.5)
-                continue
-
-            for item in queued:
-                if not self._running:
-                    break
-                if item.path in self._tasks:
-                    continue
-
-                task = asyncio.create_task(self._download_with_semaphore(item))
-                self._tasks[item.path] = task
-
-            await asyncio.sleep(0.1)
 
     async def _download_with_semaphore(self, item: DownloadItem) -> None:
         """Download with concurrency control."""

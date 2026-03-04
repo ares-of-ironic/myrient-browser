@@ -42,6 +42,7 @@ class DownloadItem:
     started_at: float = 0.0
     completed_at: float = 0.0
     expanded_from: str = ""
+    priority: int = 0  # lower = downloaded sooner; 0 = normal, negative = high priority
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -54,6 +55,7 @@ class DownloadItem:
         """Create from dictionary."""
         data = data.copy()
         data["status"] = DownloadStatus(data.get("status", "queued"))
+        data.setdefault("priority", 0)  # backwards-compatible load
         return cls(**data)
 
 
@@ -191,8 +193,29 @@ class StateManager:
             return [item for item in self.state.items.values() if item.status == status]
 
     def get_queued_items(self) -> list[DownloadItem]:
-        """Get all queued items."""
-        return self.get_items_by_status(DownloadStatus.QUEUED)
+        """Get queued items sorted by priority (lowest value first), then by added_at."""
+        with self._lock:
+            items = [item for item in self.state.items.values() if item.status == DownloadStatus.QUEUED]
+        items.sort(key=lambda i: (i.priority, i.added_at))
+        return items
+
+    def promote_item(self, path: str) -> bool:
+        """Move item to the front of the queue by giving it the highest priority.
+
+        Returns True if the item was found and promoted.
+        """
+        with self._lock:
+            item = self.state.items.get(path)
+            if item is None:
+                return False
+            # Find the minimum priority currently in the queue and go one lower
+            min_priority = min(
+                (i.priority for i in self.state.items.values() if i.status == DownloadStatus.QUEUED),
+                default=0,
+            )
+            item.priority = min_priority - 1
+            self._dirty = True
+        return True
 
     def get_downloading_items(self) -> list[DownloadItem]:
         """Get all currently downloading items."""

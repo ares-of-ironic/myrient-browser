@@ -218,7 +218,8 @@ class HelpScreen(ModalScreen[None]):
   [yellow]/[/yellow]          Focus search input
   [yellow]Escape[/yellow]     Clear search and filters
   [yellow]1-5[/yellow]        Filter: All/Queued/Active/Done/Failed
-  [yellow]p[/yellow]          Retry/restart selected download
+  [yellow]p[/yellow]          Retry/restart selected download (moves to front of queue)
+  [yellow]u[/yellow]          Move selected queued item to front of queue
   [yellow]x[/yellow]          Remove selected from queue
   [yellow]f[/yellow]          Retry all failed downloads
   [yellow]k[/yellow]          Clear all completed downloads
@@ -346,7 +347,7 @@ class DownloadPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]/[/] Search  [cyan]1-5[/] Filter",
+            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Move to front  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]/[/] Search  [cyan]1-5[/] Filter",
             id="download-help",
         )
         with Horizontal(id="download-filter-row"):
@@ -429,9 +430,10 @@ class DownloadPanel(Static):
         # Build new row data
         new_rows: dict[str, tuple] = {}
         for item in items:
+            priority_mark = "[cyan]↑[/cyan] " if item.priority < 0 else ""
             status_text = {
-                DownloadStatus.QUEUED: "[dim]Queued[/dim]",
-                DownloadStatus.DOWNLOADING: "[blue]Downloading[/blue]",
+                DownloadStatus.QUEUED: f"{priority_mark}[dim]Queued[/dim]",
+                DownloadStatus.DOWNLOADING: f"[blue]Downloading[/blue]",
                 DownloadStatus.COMPLETED: "[green]Done[/green]",
                 DownloadStatus.FAILED: "[red]Failed[/red]",
                 DownloadStatus.PAUSED: "[yellow]Paused[/yellow]",
@@ -736,6 +738,7 @@ class MyrientBrowser(App):
         Binding("[", "prev_page", "Prev page", show=False, priority=True),
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
+        Binding("u", "promote_selected", "Move to front", show=False),
         Binding("x", "remove_download", "Remove", show=False),
         Binding("f", "retry_all_failed", "Retry All", show=False),
         Binding("k", "clear_completed", "Clear Done", show=False),
@@ -1601,7 +1604,6 @@ class MyrientBrowser(App):
                 part_path.unlink(missing_ok=True)
                 
                 if item.status == DownloadStatus.DOWNLOADING:
-                    # Mark as queued - downloader will pick it up again
                     self.state.update_item(
                         item.path,
                         status=DownloadStatus.QUEUED,
@@ -1612,8 +1614,9 @@ class MyrientBrowser(App):
                         error="",
                         retries=0,
                     )
+                    self.state.promote_item(item.path)
                     self.state.save(force=True)
-                    self.notify(f"Restarting: {Path(item.path).name}")
+                    self.notify(f"↑ Restarting (priority): {Path(item.path).name}")
                 elif item.status in (DownloadStatus.FAILED, DownloadStatus.PAUSED):
                     self.state.update_item(
                         item.path,
@@ -1623,10 +1626,10 @@ class MyrientBrowser(App):
                         error="",
                         retries=0,
                     )
+                    self.state.promote_item(item.path)
                     self.state.save(force=True)
-                    self.notify(f"Retrying: {Path(item.path).name}")
+                    self.notify(f"↑ Retrying (priority): {Path(item.path).name}")
                 elif item.status == DownloadStatus.COMPLETED:
-                    # Re-download completed file
                     if local_path.exists():
                         local_path.unlink()
                     self.state.update_item(
@@ -1636,12 +1639,32 @@ class MyrientBrowser(App):
                         downloaded_size=0,
                         error="",
                     )
+                    self.state.promote_item(item.path)
                     self.state.save(force=True)
-                    self.notify(f"Re-downloading: {Path(item.path).name}")
+                    self.notify(f"↑ Re-downloading (priority): {Path(item.path).name}")
                 elif item.status == DownloadStatus.QUEUED:
-                    self.notify("Download is already queued", severity="warning")
+                    self.notify("Already queued — use [u] to move to front", severity="warning")
             else:
                 self.notify("No download selected", severity="warning")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    def action_promote_selected(self) -> None:
+        """Move selected download to the front of the queue."""
+        if not self._is_downloads_tab():
+            return
+        try:
+            panel = self.query_one("#download-panel-content", DownloadPanel)
+            item = panel.get_selected_item()
+            if not item:
+                self.notify("No download selected", severity="warning")
+                return
+            if item.status != DownloadStatus.QUEUED:
+                self.notify("Only queued items can be moved to front", severity="warning")
+                return
+            if self.state.promote_item(item.path):
+                self.state.save(force=True)
+                self.notify(f"↑ Moved to front: {Path(item.path).name}")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
