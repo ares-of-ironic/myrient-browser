@@ -33,7 +33,7 @@ ENV/
 *~
 
 # Project specific
-config.toml
+#config.toml
 state.json
 logs/
 exports/
