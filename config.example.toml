@@ -47,7 +47,7 @@ rate_limit = 0
 #   rclone config create Myrient http url https://myrient.erista.me/files/
 #   rclone lsjson --recursive Myrient: > directory/all_paths.json
 #
-index_file = "directory/sample_index.json"
+index_file = "directory/all_paths.json"
 
 # Enable automatic index reload when file changes
 watch_enabled = false

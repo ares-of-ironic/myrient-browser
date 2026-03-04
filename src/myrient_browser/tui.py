@@ -141,6 +141,30 @@ class InfoPanel(Static):
         self.update(info)
 
 
+class LoadingScreen(ModalScreen[None]):
+    """Loading screen shown during startup."""
+
+    def compose(self) -> ComposeResult:
+        with Container(id="loading-dialog"):
+            yield Static("[bold cyan]Myrient Browser[/bold cyan]", id="loading-title")
+            yield Static("", id="loading-message")
+            yield ProgressBar(id="loading-progress", show_eta=False)
+
+    def update_message(self, message: str) -> None:
+        """Update loading message."""
+        try:
+            self.query_one("#loading-message", Static).update(message)
+        except Exception:
+            pass
+
+    def set_progress(self, progress: float) -> None:
+        """Set progress bar value (0-100)."""
+        try:
+            self.query_one("#loading-progress", ProgressBar).update(progress=progress)
+        except Exception:
+            pass
+
+
 class HelpScreen(ModalScreen[None]):
     """Help screen showing all keyboard shortcuts."""
 
@@ -558,6 +582,31 @@ class MyrientBrowser(App):
         padding: 0 1;
     }
 
+    #loading-dialog {
+        width: 50;
+        height: auto;
+        padding: 2 3;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #loading-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #loading-message {
+        text-align: center;
+        padding: 1;
+        color: $text-muted;
+    }
+
+    #loading-progress {
+        width: 100%;
+        margin-top: 1;
+    }
+
     #help-dialog {
         width: 60;
         height: auto;
@@ -758,6 +807,8 @@ class MyrientBrowser(App):
 
         # Load index in background if not already loaded
         if self.index is None:
+            self.loading_screen = LoadingScreen()
+            self.push_screen(self.loading_screen)
             self.load_index_async()
         else:
             self._finish_index_load()
@@ -766,14 +817,35 @@ class MyrientBrowser(App):
     def load_index_async(self) -> None:
         """Load index in background thread."""
         try:
+            self.call_from_thread(lambda: self._update_loading("Initializing..."))
             self.index = FileIndex(self.config)
+            
+            self.call_from_thread(lambda: self._update_loading("Loading index file..."))
             self.index.load()
+            
+            self.call_from_thread(lambda: self._update_loading("Finalizing..."))
             self.call_from_thread(self._finish_index_load)
         except Exception as e:
+            self.call_from_thread(self._dismiss_loading)
             self.call_from_thread(lambda: self.notify(f"Failed to load index: {e}", severity="error"))
+
+    def _update_loading(self, message: str) -> None:
+        """Update loading screen message."""
+        if hasattr(self, 'loading_screen') and self.loading_screen:
+            self.loading_screen.update_message(message)
+
+    def _dismiss_loading(self) -> None:
+        """Dismiss loading screen."""
+        if hasattr(self, 'loading_screen') and self.loading_screen:
+            try:
+                self.pop_screen()
+            except Exception:
+                pass
+            self.loading_screen = None
 
     def _finish_index_load(self) -> None:
         """Called when index loading is complete."""
+        self._dismiss_loading()
         self.index_loading = False
         if self.index:
             self.exporter = Exporter(self.config, self.index)
@@ -882,15 +954,19 @@ class MyrientBrowser(App):
             if selected_size >= 0:
                 selected_size_str = f" ({format_size(selected_size)})"
 
-        # Current folder size
-        folder_size_str = ""
-        if self.index and self.index.has_sizes and self.current_path:
-            folder_size = self.index.get_dir_size(self.current_path)
-            if folder_size >= 0:
-                folder_size_str = f"\n[bold]Folder size:[/bold] {format_size(folder_size)}"
+        # Current folder info
+        current_folder_info = ""
+        if self.index and self.index.has_sizes:
+            if self.current_path:
+                folder_size = self.index.get_dir_size(self.current_path)
+                folder_name = self.current_path.split("/")[-1] if "/" in self.current_path else self.current_path
+                if folder_size >= 0:
+                    current_folder_info = f"\n[bold]Current:[/bold] {folder_name} ({format_size(folder_size)})"
+            elif self.index.total_size >= 0:
+                current_folder_info = f"\n[bold]Total size:[/bold] {format_size(self.index.total_size)}"
 
         stats = f"""[bold]Index:[/bold] {index_info}
-[bold]Selected:[/bold] {selected_count}{selected_size_str}{folder_size_str}
+[bold]Selected:[/bold] {selected_count}{selected_size_str}{current_folder_info}
 [bold]Queue:[/bold] {queue_stats['queued']} queued, {queue_stats['downloading']} active
 [bold]Done:[/bold] {queue_stats['completed']} completed, {queue_stats['failed']} failed"""
 
