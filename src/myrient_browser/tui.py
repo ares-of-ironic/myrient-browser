@@ -10,6 +10,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.events import Key
 from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
@@ -731,8 +732,8 @@ class MyrientBrowser(App):
         Binding("backspace", "go_back", "Back", show=False),
         Binding("m", "toggle_missing", "Missing", show=False),
         Binding("g", "go_to_parent", "Go to folder", show=False),
-        Binding("]", "next_page", "Next page", show=False),
-        Binding("[", "prev_page", "Prev page", show=False),
+        Binding("]", "next_page", "Next page", show=False, priority=True),
+        Binding("[", "prev_page", "Prev page", show=False, priority=True),
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("x", "remove_download", "Remove", show=False),
@@ -1305,23 +1306,34 @@ class MyrientBrowser(App):
         except Exception:
             pass
 
-    def action_next_page(self) -> None:
-        """Go to next page of large directory listing."""
+    def on_key(self, event: Key) -> None:
+        """Handle key events directly for pagination (priority over focused widgets)."""
         if not self._is_browser_tab():
             return
+        if event.key == "right_square_bracket":
+            event.prevent_default()
+            self.action_next_page()
+        elif event.key == "left_square_bracket":
+            event.prevent_default()
+            self.action_prev_page()
+
+    def action_next_page(self) -> None:
+        """Go to next page of large directory listing."""
         total = len(self._all_nodes)
         pages = (total + self.LIST_PAGE_SIZE - 1) // self.LIST_PAGE_SIZE
         if self._list_page < pages - 1:
             self._list_page += 1
             self.refresh_list(preserve_cursor=False)
+        else:
+            self.notify("Ostatnia strona", severity="information")
 
     def action_prev_page(self) -> None:
         """Go to previous page of large directory listing."""
-        if not self._is_browser_tab():
-            return
         if self._list_page > 0:
             self._list_page -= 1
             self.refresh_list(preserve_cursor=False)
+        else:
+            self.notify("Pierwsza strona", severity="information")
 
     def action_add_to_queue(self) -> None:
         """Add selected or highlighted item to download queue."""
