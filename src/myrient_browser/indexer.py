@@ -149,6 +149,7 @@ class FileIndex:
             # Reset state
             self.root = IndexNode(name="", path="", is_dir=True)
             self.all_paths = []
+            self.all_paths_lower: list[str] = []
             self.path_to_node = {"": self.root}
             self._path_info = {}
             self._children_cache = {}
@@ -213,8 +214,9 @@ class FileIndex:
             
             is_dir = item.get("IsDir", False) or path in dir_paths
             size = item.get("Size", -1) if not is_dir else -1
-            
+
             self.all_paths.append(path)
+            self.all_paths_lower.append(path.lower())
             self._path_info[path] = (is_dir, size)
             
             # Build children cache
@@ -272,8 +274,9 @@ class FileIndex:
         # Store path info
         for path, is_dir in raw_entries:
             actual_is_dir = is_dir or path in dir_paths
-            
+
             self.all_paths.append(path)
+            self.all_paths_lower.append(path.lower())
             self._path_info[path] = (actual_is_dir, -1)
             
             # Build children cache
@@ -457,29 +460,39 @@ class FileIndex:
         return result_nodes[:limit]
 
     def _search_term(self, term: str, candidates: list[str], limit: int) -> list[str]:
-        """Search for a single term."""
+        """Search for a single term using pre-lowercased paths for speed."""
+        # Use pre-lowercased paths list if candidates is the full all_paths list
+        if candidates is self.all_paths:
+            paths_lower = self.all_paths_lower
+        else:
+            paths_lower = [p.lower() for p in candidates]
+
         exact_matches = []
-        for path in candidates:
-            if term in path.lower():
-                exact_matches.append(path)
+        for i, path_lower in enumerate(paths_lower):
+            if term in path_lower:
+                exact_matches.append(candidates[i])
                 if len(exact_matches) >= limit:
                     break
 
-        if len(exact_matches) >= limit // 4:
+        # If any exact matches found, return them - no fuzzy needed
+        if exact_matches:
             return exact_matches[:limit]
+
+        # No exact matches: fuzzy search only on filenames to avoid scanning 3M full paths
+        # Cap to 200k candidates to prevent CPU overload for very rare queries
+        cap = min(len(candidates), 200_000)
+        fuzzy_candidates = candidates[:cap]
+        names = [p.rsplit("/", 1)[-1] if "/" in p else p for p in fuzzy_candidates]
 
         fuzzy_results = process.extract(
             term,
-            candidates,
+            names,
             scorer=fuzz.partial_ratio,
             limit=limit,
-            score_cutoff=70,
+            score_cutoff=65,
         )
 
-        fuzzy_matches = [path for path, score, _ in fuzzy_results]
-
-        combined = list(dict.fromkeys(exact_matches + fuzzy_matches))
-        return combined[:limit]
+        return [fuzzy_candidates[idx] for _, _score, idx in fuzzy_results]
 
     def expand_selection(self, paths: list[str]) -> list[str]:
         """Expand directories to their contained files.

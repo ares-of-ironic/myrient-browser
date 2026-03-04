@@ -772,7 +772,8 @@ class MyrientBrowser(App):
         self.selected_paths: set[str] = set()
         self.current_items: list[IndexNode] = []
         self.downloaded_cache: set[str] = set()
-        
+        self._search_debounce_timer = None
+
         if index is not None:
             self.index_loading = False
             self.exporter = Exporter(config, index)
@@ -913,59 +914,70 @@ class MyrientBrowser(App):
         self.notify("Index reloaded")
 
     def refresh_list(self, preserve_cursor: bool = False) -> None:
-        """Refresh the file list."""
-        list_view = self.query_one("#file-list", ListView)
-        path_display = self.query_one("#path-display", Static)
-
-        # Save current cursor position
-        old_index = list_view.index if preserve_cursor else None
-
-        # Show loading message if index not ready
+        """Refresh the file list. For search queries, dispatches to a background worker."""
         if self.index is None or self.index_loading:
+            list_view = self.query_one("#file-list", ListView)
             list_view.clear()
-            path_display.update("[yellow]Loading index...[/yellow]")
+            self.query_one("#path-display", Static).update("[yellow]Loading index...[/yellow]")
             self.current_items = []
             return
 
         if self.search_query:
-            nodes = self.index.search(self.search_query, limit=200)
+            # Run search in a background thread to avoid blocking the event loop
+            self._run_search(self.search_query, preserve_cursor)
         else:
             nodes = self.index.get_children(self.current_path)
+            if self.show_only_missing:
+                nodes = [n for n in nodes if check_download_status(self.config, n.path) != "DOWNLOADED"]
+            label = f"/{self.current_path}" if self.current_path else "/"
+            self._populate_list(nodes, label, preserve_cursor)
 
+    @work(exclusive=True, thread=True)
+    def _run_search(self, query: str, preserve_cursor: bool = False) -> None:
+        """Run search in a background thread, then update UI from main thread."""
+        if not self.index:
+            return
+        nodes = self.index.search(query, limit=200)
         if self.show_only_missing:
             nodes = [n for n in nodes if check_download_status(self.config, n.path) != "DOWNLOADED"]
+        label = f"Search: {query} ({len(nodes)} results)"
+        self.call_from_thread(self._apply_search_results, query, nodes, label, preserve_cursor)
+
+    def _apply_search_results(
+        self, query: str, nodes: list, label: str, preserve_cursor: bool
+    ) -> None:
+        """Apply search results to UI (must be called from main thread)."""
+        # Discard stale results if user kept typing
+        if query != self.search_query:
+            return
+        self._populate_list(nodes, label, preserve_cursor)
+
+    def _populate_list(self, nodes: list, path_label: str, preserve_cursor: bool = False) -> None:
+        """Populate the file list with nodes and update UI (main thread only)."""
+        list_view = self.query_one("#file-list", ListView)
+        path_display = self.query_one("#path-display", Static)
+
+        old_index = list_view.index if preserve_cursor else None
 
         self.current_items = nodes
 
-        # Pre-build all PathItem objects before touching the DOM
-        has_sizes = self.index.has_sizes
+        has_sizes = self.index.has_sizes if self.index else False
         items: list[PathItem] = []
         for node in nodes:
             is_selected = node.path in self.selected_paths
-            # check_download_status only for files (dirs are never downloaded)
-            if not node.is_dir:
-                status = check_download_status(self.config, node.path)
-            else:
-                status = "MISSING"
+            status = check_download_status(self.config, node.path) if not node.is_dir else "MISSING"
             size = (self.index.get_dir_size(node.path) if node.is_dir else node.size) if has_sizes else -1
             items.append(PathItem(node, selected=is_selected, download_status=status, size=size))
 
-        # Batch all DOM mutations to avoid re-rendering on every append
         with self.batch_update():
             list_view.clear()
             for item in items:
                 list_view.append(item)
 
-        # Restore cursor position
         if old_index is not None and nodes:
             list_view.index = min(old_index, len(nodes) - 1)
 
-        if self.search_query:
-            path_display.update(f"Search: {self.search_query} ({len(nodes)} results)")
-        else:
-            path_display.update(f"/{self.current_path}" if self.current_path else "/")
-
-        # Update stats after refreshing list
+        path_display.update(path_label)
         self.update_stats()
 
     def update_stats(self) -> None:
@@ -1062,9 +1074,18 @@ class MyrientBrowser(App):
 
     @on(Input.Changed, "#search-input")
     def on_search_changed(self, event: Input.Changed) -> None:
-        """Handle search input change."""
+        """Handle search input change with debounce to avoid hammering the index."""
         self.search_query = event.value
-        self.refresh_list()
+        # Cancel pending debounce timer
+        if self._search_debounce_timer is not None:
+            self._search_debounce_timer.stop()
+            self._search_debounce_timer = None
+        if not event.value:
+            # Empty query - show directory immediately
+            self.refresh_list()
+        else:
+            # Debounce: wait 300ms after last keystroke before searching
+            self._search_debounce_timer = self.set_timer(0.3, self.refresh_list)
 
     @on(Switch.Changed, "#missing-switch")
     def on_missing_switch_changed(self, event: Switch.Changed) -> None:
