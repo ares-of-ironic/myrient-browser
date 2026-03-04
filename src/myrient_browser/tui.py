@@ -731,8 +731,8 @@ class MyrientBrowser(App):
         Binding("backspace", "go_back", "Back", show=False),
         Binding("m", "toggle_missing", "Missing", show=False),
         Binding("g", "go_to_parent", "Go to folder", show=False),
-        Binding("n", "next_page", "Next page", show=False),
-        Binding("b", "prev_page", "Prev page", show=False),
+        Binding("]", "next_page", "Next page", show=False),
+        Binding("[", "prev_page", "Prev page", show=False),
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("x", "remove_download", "Remove", show=False),
@@ -1004,7 +1004,11 @@ class MyrientBrowser(App):
         # Show pagination info if the directory is too large
         if total > page_size:
             pages = (total + page_size - 1) // page_size
-            label = f"{path_label}  [dim][{start + 1}-{end}/{total}, page {self._list_page + 1}/{pages} — n/p next/prev][/dim]"
+            label = (
+                f"{path_label}  [dim]{start + 1}-{end}/{total}, str. {self._list_page + 1}/{pages}[/dim]"
+                f"  [cyan]][/cyan][dim] nast.[/dim]"
+                f"  [cyan]\\[[/cyan][dim] poprz.[/dim]"
+            )
         else:
             label = path_label
         path_display.update(label)
