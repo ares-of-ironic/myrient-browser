@@ -1393,9 +1393,15 @@ class MyrientBrowser(App):
 
     @work(exclusive=True)
     async def add_to_download_queue(self, paths: list[str]) -> None:
-        """Add paths to download queue."""
+        """Add paths to download queue, including file sizes from the index."""
         if self.downloader:
-            added = await self.downloader.add_to_queue(paths)
+            sizes: dict[str, int] = {}
+            if self.index and self.index.has_sizes:
+                for path in paths:
+                    info = self.index._path_info.get(path)
+                    if info and not info[0]:  # file, not directory
+                        sizes[path] = info[1]
+            added = await self.downloader.add_to_queue(paths, sizes=sizes)
             self.notify(f"Added {added} files to queue")
             self.update_stats()
 

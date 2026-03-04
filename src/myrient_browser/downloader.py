@@ -114,7 +114,12 @@ class DownloadManager:
             await self._client.aclose()
             self._client = None
 
-    async def add_to_queue(self, paths: list[str], expanded_from: str = "") -> int:
+    async def add_to_queue(
+        self,
+        paths: list[str],
+        expanded_from: str = "",
+        sizes: dict[str, int] | None = None,
+    ) -> int:
         """Add paths to download queue.
 
         Returns number of items added.
@@ -126,12 +131,14 @@ class DownloadManager:
 
             url = self.config.build_url(path)
             local_path = str(self.config.get_local_path(path))
+            total_size = (sizes.get(path, 0) if sizes else 0) or 0
 
             item = DownloadItem(
                 path=path,
                 url=url,
                 local_path=local_path,
                 expanded_from=expanded_from,
+                total_size=total_size,
             )
             self.state.add_item(item)
             added += 1
