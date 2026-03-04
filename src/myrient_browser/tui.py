@@ -1212,21 +1212,22 @@ class MyrientBrowser(App):
         """Go to parent folder of highlighted item."""
         if not self._is_browser_tab():
             return
-        
+
         list_view = self.query_one("#file-list", ListView)
         if not list_view.highlighted_child or not isinstance(list_view.highlighted_child, PathItem):
             return
-        
+
         node = list_view.highlighted_child.node
-        target_name = node.name
-        
-        # Get parent path
+
+        # Extract parent path directly from the full node path
         if "/" in node.path:
             parent_path = node.path.rsplit("/", 1)[0]
+            target_name = node.path.rsplit("/", 1)[1]
         else:
             parent_path = ""
-        
-        # Clear search and navigate to parent
+            target_name = node.name
+
+        # Clear search and navigate directly to the parent folder
         self.search_query = ""
         try:
             self.query_one("#search-input", Input).value = ""
@@ -1234,16 +1235,16 @@ class MyrientBrowser(App):
             pass
         self.current_path = parent_path
         self.refresh_list()
-        
-        # Find and highlight the target item after refresh
-        self.call_later(self._highlight_item, target_name)
+
+        # Highlight the item after the screen has fully refreshed
+        self.call_after_refresh(self._highlight_item, target_name)
 
     def _highlight_item(self, target_name: str) -> None:
         """Highlight item by name in current list."""
         try:
             list_view = self.query_one("#file-list", ListView)
-            for idx, item in enumerate(self.current_items):
-                if item.name == target_name:
+            for idx, node in enumerate(self.current_items):
+                if node.name == target_name:
                     list_view.index = idx
                     break
         except Exception:
