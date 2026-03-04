@@ -514,7 +514,7 @@ class FileIndex:
         return result
 
     def get_selection_size(self, paths: list[str]) -> int:
-        """Calculate total size of selected paths.
+        """Calculate total size of selected paths using cached dir sizes.
         
         Returns -1 if any file has unknown size.
         """
@@ -523,29 +523,23 @@ class FileIndex:
 
         for path in paths:
             path = path.strip("/")
+            if path in seen:
+                continue
+            seen.add(path)
+            
             info = self._path_info.get(path)
             if info is None:
                 continue
             
             is_dir, size = info
             if not is_dir:
-                if path not in seen:
-                    seen.add(path)
-                    if size < 0:
-                        return -1
-                    total += size
+                if size < 0:
+                    return -1
+                total += size
             else:
-                # Expand directory
-                prefix = path + "/"
-                for p in self.all_paths:
-                    if p.startswith(prefix):
-                        p_info = self._path_info.get(p)
-                        if p_info and not p_info[0]:  # is file
-                            if p not in seen:
-                                seen.add(p)
-                                if p_info[1] < 0:
-                                    return -1
-                                total += p_info[1]
+                # Use cached directory size instead of iterating
+                dir_size = self._dir_size_cache.get(path, 0)
+                total += dir_size
 
         return total
 
