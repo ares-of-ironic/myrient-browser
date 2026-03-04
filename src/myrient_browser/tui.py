@@ -920,7 +920,7 @@ class MyrientBrowser(App):
         self.call_from_thread(self.update_stats)
         self.notify("Index reloaded")
 
-    def refresh_list(self, preserve_cursor: bool = False) -> None:
+    def refresh_list(self, preserve_cursor: bool = False, reset_page: bool = True) -> None:
         """Refresh the file list. For search queries, dispatches to a background worker."""
         if self.index is None or self.index_loading:
             list_view = self.query_one("#file-list", ListView)
@@ -929,7 +929,7 @@ class MyrientBrowser(App):
             self.current_items = []
             return
 
-        if not preserve_cursor:
+        if reset_page:
             self._list_page = 0
 
         if self.search_query:
@@ -1326,7 +1326,7 @@ class MyrientBrowser(App):
         pages = (total + self.LIST_PAGE_SIZE - 1) // self.LIST_PAGE_SIZE
         if self._list_page < pages - 1:
             self._list_page += 1
-            self.refresh_list(preserve_cursor=False)
+            self.refresh_list(preserve_cursor=False, reset_page=False)
         else:
             self.notify("Ostatnia strona", severity="information")
 
@@ -1334,7 +1334,7 @@ class MyrientBrowser(App):
         """Go to previous page of large directory listing."""
         if self._list_page > 0:
             self._list_page -= 1
-            self.refresh_list(preserve_cursor=False)
+            self.refresh_list(preserve_cursor=False, reset_page=False)
         else:
             self.notify("Pierwsza strona", severity="information")
 
