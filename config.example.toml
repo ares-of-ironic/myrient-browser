@@ -78,3 +78,9 @@ backup_count = 3
 [state]
 # State file for download queue persistence
 state_file = "state.json"
+
+[display]
+# Use decimal units (1 KB = 1000 bytes, 1 TB = 1000 GB)
+# Set to false for binary units (1 KiB = 1024 bytes, 1 TiB = 1024 GiB)
+# Decimal units match what most websites and storage vendors report
+use_decimal_units = true

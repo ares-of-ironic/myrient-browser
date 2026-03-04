@@ -67,6 +67,14 @@ class StateConfig:
 
 
 @dataclass
+class DisplayConfig:
+    """Display configuration."""
+
+    # Use decimal units (1 KB = 1000 B) instead of binary (1 KB = 1024 B)
+    use_decimal_units: bool = True
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -76,6 +84,7 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     state: StateConfig = field(default_factory=StateConfig)
+    display: DisplayConfig = field(default_factory=DisplayConfig)
     project_root: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -119,6 +128,8 @@ class Config:
             self._update_dataclass(self.logging, data["logging"])
         if "state" in data:
             self._update_dataclass(self.state, data["state"])
+        if "display" in data:
+            self._update_dataclass(self.display, data["display"])
 
     def _load_from_env(self) -> None:
         """Load configuration from environment variables."""

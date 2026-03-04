@@ -13,19 +13,30 @@ from rapidfuzz import fuzz, process
 from .config import Config
 
 
-def format_size(size: int) -> str:
-    """Format size in bytes to human readable string."""
+def format_size(size: int, use_decimal: bool = False) -> str:
+    """Format size in bytes to human readable string.
+    
+    Args:
+        size: Size in bytes
+        use_decimal: If True, use decimal units (1 KB = 1000 B).
+                     If False, use binary units (1 KB = 1024 B).
+    """
     if size < 0:
         return "-"
     if size == 0:
         return "0 B"
-    if size < 1024:
+    
+    base = 1000 if use_decimal else 1024
+    
+    if size < base:
         return f"{size} B"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.1f} KB"
-    if size < 1024 * 1024 * 1024:
-        return f"{size / 1024 / 1024:.1f} MB"
-    return f"{size / 1024 / 1024 / 1024:.2f} GB"
+    if size < base ** 2:
+        return f"{size / base:.1f} KB"
+    if size < base ** 3:
+        return f"{size / base ** 2:.1f} MB"
+    if size < base ** 4:
+        return f"{size / base ** 3:.2f} GB"
+    return f"{size / base ** 4:.2f} TB"
 
 
 class IndexNode:

@@ -33,8 +33,17 @@ from textual.widgets import (
 from .config import Config
 from .downloader import DownloadManager, check_download_status
 from .exporter import Exporter
-from .indexer import FileIndex, IndexNode, format_size
+from .indexer import FileIndex, IndexNode, format_size as _format_size_base
 from .state import DownloadItem, DownloadStatus, StateManager
+
+# Global config reference for format_size
+_display_config: Config | None = None
+
+
+def format_size(size: int) -> str:
+    """Format size using global display config."""
+    use_decimal = _display_config.display.use_decimal_units if _display_config else True
+    return _format_size_base(size, use_decimal=use_decimal)
 
 
 class PathItem(ListItem):
@@ -744,6 +753,10 @@ class MyrientBrowser(App):
         self.exporter: Exporter | None = None
         self.downloader: DownloadManager | None = None
 
+        # Set global config for format_size
+        global _display_config
+        _display_config = config
+
         self.selected_paths: set[str] = set()
         self.current_items: list[IndexNode] = []
         self.downloaded_cache: set[str] = set()
@@ -933,6 +946,9 @@ class MyrientBrowser(App):
             path_display.update(f"Search: {self.search_query} ({len(nodes)} results)")
         else:
             path_display.update(f"/{self.current_path}" if self.current_path else "/")
+
+        # Update stats after refreshing list
+        self.update_stats()
 
     def update_stats(self) -> None:
         """Update statistics panel."""
