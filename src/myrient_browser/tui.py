@@ -196,40 +196,41 @@ class HelpScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         help_text = """[bold cyan]Myrient Browser - Keyboard Shortcuts[/bold cyan]
 
-[bold]Navigation (Browser tab):[/bold]
-  [yellow]Enter[/yellow]      Enter directory
-  [yellow]Backspace[/yellow]  Go back / parent directory
-  [yellow]g[/yellow]          Go to folder containing highlighted item
-  [yellow]/[/yellow]          Focus search input
-  [yellow]Escape[/yellow]     Clear search, go to root
+[bold]── Browser tab: Navigation ──────────────────[/bold]
+  [yellow]Enter[/yellow]       Enter directory
+  [yellow]Backspace[/yellow]   Go up one level
+  [yellow]g[/yellow]           Go to folder containing highlighted item (useful after search)
+  [yellow]/[/yellow]           Focus search input  [dim](300 ms debounce, powered by rg)[/dim]
+  [yellow]Escape[/yellow]      Clear search / go to root
+  [yellow]][/yellow] [yellow][][/yellow]        Next / previous page  [dim](large directories, 500 items/page)[/dim]
 
-[bold]Selection:[/bold]
-  [yellow]Space[/yellow]      Toggle select item (recursive for dirs)
-  [yellow]a[/yellow]          Select all in current view
-  [yellow]c[/yellow]          Clear all selections
+[bold]── Browser tab: Selection ───────────────────[/bold]
+  [yellow]Space[/yellow]       Toggle select item  [dim](recursive for directories)[/dim]
+  [yellow]a[/yellow]           Select all visible items
+  [yellow]c[/yellow]           Clear all selections
 
-[bold]Actions:[/bold]
-  [yellow]d[/yellow]          Download selected/highlighted
-  [yellow]e[/yellow]          Export selected/highlighted
-  [yellow]r[/yellow]          Reload index
-  [yellow]m[/yellow]          Toggle "show only missing" filter
+[bold]── Browser tab: Actions ─────────────────────[/bold]
+  [yellow]d[/yellow]           Add highlighted / selected to download queue
+  [yellow]e[/yellow]           Export highlighted / selected to file
+  [yellow]m[/yellow]           Toggle "show missing only" filter
+  [yellow]r[/yellow]           Reload index file
 
-[bold]Downloads tab:[/bold]
-  [yellow]/[/yellow]          Focus search input
-  [yellow]Escape[/yellow]     Clear search and filters
-  [yellow]1-5[/yellow]        Filter: All/Queued/Active/Done/Failed
-  [yellow]p[/yellow]          Retry/restart selected download (moves to front of queue)
-  [yellow]u[/yellow]          Move selected queued item to front of queue
-  [yellow]x[/yellow]          Remove selected from queue
-  [yellow]f[/yellow]          Retry all failed downloads
-  [yellow]k[/yellow]          Clear all completed downloads
-  [yellow]X[/yellow]          Clear entire queue (with confirmation)
+[bold]── Downloads tab ────────────────────────────[/bold]
+  [yellow]/[/yellow]           Focus search input
+  [yellow]Escape[/yellow]      Clear search and filters
+  [yellow]1[/yellow]-[yellow]5[/yellow]         Filter: All / Queued / Active / Done / Failed
+  [yellow]p[/yellow]           Retry / restart selected  [dim](jumps to front of queue)[/dim]
+  [yellow]u[/yellow]           Move selected queued item to front of queue
+  [yellow]x[/yellow]           Remove selected from queue
+  [yellow]f[/yellow]           Retry all failed downloads
+  [yellow]k[/yellow]           Clear all completed downloads
+  [yellow]X[/yellow]           Clear entire queue  [dim](confirmation required)[/dim]
 
-[bold]General:[/bold]
-  [yellow]h[/yellow]          Show this help
-  [yellow]q[/yellow]          Quit application
+[bold]── General ──────────────────────────────────[/bold]
+  [yellow]h[/yellow]           Show / close this help
+  [yellow]q[/yellow]           Quit
 
-[dim]Press Escape, h or q to close this help[/dim]"""
+[dim]Press Escape, h or q to close[/dim]"""
 
         with Container(id="help-dialog"):
             yield Static(help_text, id="help-content")
