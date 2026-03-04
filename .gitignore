@@ -38,7 +38,9 @@ state.json
 logs/
 exports/
 downloads/
-directory/
+# Directory - ignore large index files, keep sample
+directory/*
+!directory/sample_index.json
 
 # Testing
 .pytest_cache/

@@ -40,10 +40,14 @@ rate_limit = 0
 #   - Text file (one path per line): all_paths.txt
 #   - JSON file (rclone lsjson output): all_paths.json - includes file sizes!
 #
-# To generate JSON index with sizes using rclone:
-#   rclone lsjson --recursive Myrient: > all_paths.json
+# Sample index included for testing:
+#   index_file = "directory/sample_index.json"
 #
-index_file = "directory/all_paths.json"
+# To generate full JSON index with sizes using rclone:
+#   rclone config create Myrient http url https://myrient.erista.me/files/
+#   rclone lsjson --recursive Myrient: > directory/all_paths.json
+#
+index_file = "directory/sample_index.json"
 
 # Enable automatic index reload when file changes
 watch_enabled = false
