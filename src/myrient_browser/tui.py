@@ -918,14 +918,13 @@ class MyrientBrowser(App):
         """Refresh the file list."""
         list_view = self.query_one("#file-list", ListView)
         path_display = self.query_one("#path-display", Static)
-        
+
         # Save current cursor position
         old_index = list_view.index if preserve_cursor else None
-        
-        list_view.clear()
 
         # Show loading message if index not ready
         if self.index is None or self.index_loading:
+            list_view.clear()
             path_display.update("[yellow]Loading index...[/yellow]")
             self.current_items = []
             return
@@ -940,21 +939,28 @@ class MyrientBrowser(App):
 
         self.current_items = nodes
 
+        # Pre-build all PathItem objects before touching the DOM
+        has_sizes = self.index.has_sizes
+        items: list[PathItem] = []
         for node in nodes:
             is_selected = node.path in self.selected_paths
-            status = check_download_status(self.config, node.path)
-            # Get size - for dirs use get_dir_size, for files use node.size
-            if self.index.has_sizes:
-                size = self.index.get_dir_size(node.path) if node.is_dir else node.size
+            # check_download_status only for files (dirs are never downloaded)
+            if not node.is_dir:
+                status = check_download_status(self.config, node.path)
             else:
-                size = -1
-            item = PathItem(node, selected=is_selected, download_status=status, size=size)
-            list_view.append(item)
+                status = "MISSING"
+            size = (self.index.get_dir_size(node.path) if node.is_dir else node.size) if has_sizes else -1
+            items.append(PathItem(node, selected=is_selected, download_status=status, size=size))
+
+        # Batch all DOM mutations to avoid re-rendering on every append
+        with self.batch_update():
+            list_view.clear()
+            for item in items:
+                list_view.append(item)
 
         # Restore cursor position
         if old_index is not None and nodes:
-            new_index = min(old_index, len(nodes) - 1)
-            list_view.index = new_index
+            list_view.index = min(old_index, len(nodes) - 1)
 
         if self.search_query:
             path_display.update(f"Search: {self.search_query} ({len(nodes)} results)")

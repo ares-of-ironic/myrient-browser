@@ -88,6 +88,36 @@ class StateManager:
         self.state = QueueState()
         self._lock = Lock()
         self._dirty = False
+        self._stats: dict[str, int] = {
+            "total": 0,
+            "queued": 0,
+            "downloading": 0,
+            "completed": 0,
+            "failed": 0,
+            "paused": 0,
+        }
+
+    def _rebuild_stats(self) -> None:
+        """Rebuild stats cache from scratch (call while holding _lock)."""
+        self._stats = {s: 0 for s in ("total", "queued", "downloading", "completed", "failed", "paused")}
+        for item in self.state.items.values():
+            self._stats["total"] += 1
+            self._stats[item.status.value] += 1
+
+    def _stats_add(self, item: DownloadItem) -> None:
+        """Increment stats for a newly added item (call while holding _lock)."""
+        self._stats["total"] += 1
+        self._stats[item.status.value] += 1
+
+    def _stats_remove(self, item: DownloadItem) -> None:
+        """Decrement stats for a removed item (call while holding _lock)."""
+        self._stats["total"] -= 1
+        self._stats[item.status.value] -= 1
+
+    def _stats_change_status(self, old_status: DownloadStatus, new_status: DownloadStatus) -> None:
+        """Update stats when an item changes status (call while holding _lock)."""
+        self._stats[old_status.value] -= 1
+        self._stats[new_status.value] += 1
 
     def load(self) -> None:
         """Load state from file."""
@@ -100,6 +130,7 @@ class StateManager:
                 data = json.load(f)
             with self._lock:
                 self.state = QueueState.from_dict(data)
+                self._rebuild_stats()
         except (json.JSONDecodeError, KeyError, TypeError):
             self.state = QueueState()
 
@@ -121,14 +152,19 @@ class StateManager:
     def add_item(self, item: DownloadItem) -> None:
         """Add item to queue."""
         with self._lock:
+            existing = self.state.items.get(item.path)
+            if existing is not None:
+                self._stats_remove(existing)
             self.state.items[item.path] = item
+            self._stats_add(item)
             self._dirty = True
 
     def remove_item(self, path: str) -> None:
         """Remove item from queue."""
         with self._lock:
-            if path in self.state.items:
-                del self.state.items[path]
+            item = self.state.items.pop(path, None)
+            if item is not None:
+                self._stats_remove(item)
                 self._dirty = True
 
     def update_item(self, path: str, **kwargs: Any) -> None:
@@ -136,9 +172,12 @@ class StateManager:
         with self._lock:
             if path in self.state.items:
                 item = self.state.items[path]
+                old_status = item.status
                 for key, value in kwargs.items():
                     if hasattr(item, key):
                         setattr(item, key, value)
+                if "status" in kwargs and kwargs["status"] != old_status:
+                    self._stats_change_status(old_status, item.status)
                 self._dirty = True
 
     def get_item(self, path: str) -> DownloadItem | None:
@@ -217,24 +256,15 @@ class StateManager:
         with self._lock:
             count = len(self.state.items)
             self.state.items.clear()
+            self._rebuild_stats()
             if count > 0:
                 self._dirty = True
             return count
 
     def get_stats(self) -> dict[str, int]:
-        """Get queue statistics."""
+        """Get queue statistics (O(1) - uses incremental cache)."""
         with self._lock:
-            stats = {
-                "total": len(self.state.items),
-                "queued": 0,
-                "downloading": 0,
-                "completed": 0,
-                "failed": 0,
-                "paused": 0,
-            }
-            for item in self.state.items.values():
-                stats[item.status.value] += 1
-            return stats
+            return dict(self._stats)
 
     @property
     def is_empty(self) -> bool:
