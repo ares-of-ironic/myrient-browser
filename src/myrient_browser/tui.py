@@ -731,6 +731,8 @@ class MyrientBrowser(App):
         Binding("backspace", "go_back", "Back", show=False),
         Binding("m", "toggle_missing", "Missing", show=False),
         Binding("g", "go_to_parent", "Go to folder", show=False),
+        Binding("n", "next_page", "Next page", show=False),
+        Binding("b", "prev_page", "Prev page", show=False),
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("x", "remove_download", "Remove", show=False),
@@ -751,6 +753,8 @@ class MyrientBrowser(App):
     current_path = reactive("")
     search_query = reactive("")
     index_loading = reactive(True)
+
+    LIST_PAGE_SIZE = 500
 
     def __init__(
         self,
@@ -773,6 +777,8 @@ class MyrientBrowser(App):
         self.current_items: list[IndexNode] = []
         self.downloaded_cache: set[str] = set()
         self._search_debounce_timer = None
+        self._all_nodes: list[IndexNode] = []  # Full untruncated node list
+        self._list_page: int = 0  # Current page for large directories
 
         if index is not None:
             self.index_loading = False
@@ -922,6 +928,9 @@ class MyrientBrowser(App):
             self.current_items = []
             return
 
+        if not preserve_cursor:
+            self._list_page = 0
+
         if self.search_query:
             # Run search in a background thread to avoid blocking the event loop
             self._run_search(self.search_query, preserve_cursor)
@@ -953,17 +962,32 @@ class MyrientBrowser(App):
         self._populate_list(nodes, label, preserve_cursor)
 
     def _populate_list(self, nodes: list, path_label: str, preserve_cursor: bool = False) -> None:
-        """Populate the file list with nodes and update UI (main thread only)."""
+        """Populate the file list with nodes and update UI (main thread only).
+
+        Large directories are paginated to LIST_PAGE_SIZE items.
+        """
         list_view = self.query_one("#file-list", ListView)
         path_display = self.query_one("#path-display", Static)
 
         old_index = list_view.index if preserve_cursor else None
 
-        self.current_items = nodes
+        self._all_nodes = nodes
+        total = len(nodes)
+
+        # Apply pagination
+        page_size = self.LIST_PAGE_SIZE
+        start = self._list_page * page_size
+        if start >= total and total > 0:
+            self._list_page = 0
+            start = 0
+        end = min(start + page_size, total)
+        page_nodes = nodes[start:end]
+
+        self.current_items = page_nodes
 
         has_sizes = self.index.has_sizes if self.index else False
         items: list[PathItem] = []
-        for node in nodes:
+        for node in page_nodes:
             is_selected = node.path in self.selected_paths
             status = check_download_status(self.config, node.path) if not node.is_dir else "MISSING"
             size = (self.index.get_dir_size(node.path) if node.is_dir else node.size) if has_sizes else -1
@@ -974,10 +998,16 @@ class MyrientBrowser(App):
             for item in items:
                 list_view.append(item)
 
-        if old_index is not None and nodes:
-            list_view.index = min(old_index, len(nodes) - 1)
+        if old_index is not None and page_nodes:
+            list_view.index = min(old_index, len(page_nodes) - 1)
 
-        path_display.update(path_label)
+        # Show pagination info if the directory is too large
+        if total > page_size:
+            pages = (total + page_size - 1) // page_size
+            label = f"{path_label}  [dim][{start + 1}-{end}/{total}, page {self._list_page + 1}/{pages} — n/p next/prev][/dim]"
+        else:
+            label = path_label
+        path_display.update(label)
         self.update_stats()
 
     def update_stats(self) -> None:
@@ -1270,6 +1300,24 @@ class MyrientBrowser(App):
                     break
         except Exception:
             pass
+
+    def action_next_page(self) -> None:
+        """Go to next page of large directory listing."""
+        if not self._is_browser_tab():
+            return
+        total = len(self._all_nodes)
+        pages = (total + self.LIST_PAGE_SIZE - 1) // self.LIST_PAGE_SIZE
+        if self._list_page < pages - 1:
+            self._list_page += 1
+            self.refresh_list(preserve_cursor=False)
+
+    def action_prev_page(self) -> None:
+        """Go to previous page of large directory listing."""
+        if not self._is_browser_tab():
+            return
+        if self._list_page > 0:
+            self._list_page -= 1
+            self.refresh_list(preserve_cursor=False)
 
     def action_add_to_queue(self) -> None:
         """Add selected or highlighted item to download queue."""

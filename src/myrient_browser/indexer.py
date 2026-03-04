@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from threading import Lock, Thread
@@ -11,6 +14,9 @@ from typing import Callable, Iterator
 from rapidfuzz import fuzz, process
 
 from .config import Config
+
+# Detect ripgrep availability once at import time
+_RG_BIN: str | None = shutil.which("rg")
 
 
 def format_size(size: int, use_decimal: bool = False) -> str:
@@ -122,6 +128,7 @@ class FileIndex:
         self.config = config
         self.root = IndexNode(name="", path="", is_dir=True)
         self.all_paths: list[str] = []
+        self.all_paths_lower: list[str] = []
         self.path_to_node: dict[str, IndexNode] = {}
         self._path_info: dict[str, tuple[bool, int]] = {}  # path -> (is_dir, size)
         self._children_cache: dict[str, list[str]] = {}  # parent_path -> [child_paths]
@@ -133,6 +140,7 @@ class FileIndex:
         self._has_sizes = False
         self._tree_built = False
         self._dir_size_cache: dict[str, int] = {}
+        self._index_path: Path | None = None
 
     @property
     def has_sizes(self) -> bool:
@@ -147,6 +155,7 @@ class FileIndex:
 
         with self._lock:
             # Reset state
+            self._index_path = index_path
             self.root = IndexNode(name="", path="", is_dir=True)
             self.all_paths = []
             self.all_paths_lower: list[str] = []
@@ -423,32 +432,29 @@ class FileIndex:
         """Search for paths matching query.
 
         Supports:
-        - Simple substring matching
-        - Fuzzy matching with rapidfuzz
+        - Simple substring matching (via rg or Python fallback)
         - Multiple terms separated by |
         """
         if not query:
             return []
 
         query = query.strip()
-        terms = [t.strip().lower() for t in query.split("|") if t.strip()]
+        terms = [t.strip() for t in query.split("|") if t.strip()]
 
         if not terms:
             return []
 
-        with self._lock:
-            candidates = self.all_paths
-
-        if dirs_only:
-            candidates = [p for p in candidates if self._path_info.get(p, (False, -1))[0]]
-        elif files_only:
-            candidates = [p for p in candidates if not self._path_info.get(p, (True, -1))[0]]
-
         matches: set[str] = set()
 
         for term in terms:
-            term_matches = self._search_term(term, candidates, limit * 2)
-            matches.update(term_matches)
+            term_paths = self._search_term(term, limit * 2)
+            matches.update(term_paths)
+
+        # Filter by type if requested
+        if dirs_only:
+            matches = {p for p in matches if self._path_info.get(p, (False, -1))[0]}
+        elif files_only:
+            matches = {p for p in matches if not self._path_info.get(p, (True, -1))[0]}
 
         result_nodes = []
         for path in matches:
@@ -459,39 +465,79 @@ class FileIndex:
         result_nodes.sort(key=lambda n: (not n.is_dir, n.path.lower()))
         return result_nodes[:limit]
 
-    def _search_term(self, term: str, candidates: list[str], limit: int) -> list[str]:
-        """Search for a single term using pre-lowercased paths for speed."""
-        # Use pre-lowercased paths list if candidates is the full all_paths list
-        if candidates is self.all_paths:
-            paths_lower = self.all_paths_lower
-        else:
-            paths_lower = [p.lower() for p in candidates]
+    def _search_term(self, term: str, limit: int) -> list[str]:
+        """Search index for a single term. Uses rg if available, else Python."""
+        if _RG_BIN and self._index_path:
+            result = self._search_with_rg(term, limit)
+            if result is not None:
+                return result
+        return self._search_python(term, limit)
 
-        exact_matches = []
+    def _search_with_rg(self, term: str, limit: int) -> list[str] | None:
+        """Search using ripgrep on the raw index file. Returns None on error."""
+        try:
+            cmd = [
+                _RG_BIN, "-i",
+                "--max-count", str(limit),
+                "--",
+                re.escape(term),
+                str(self._index_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode not in (0, 1):  # 0=found, 1=not found
+                return None
+
+            if not result.stdout:
+                return []
+
+            # Parse matching lines - support both JSON and plain text formats
+            paths: list[str] = []
+            _path_re = re.compile(r'"Path"\s*:\s*"([^"]+)"')
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m = _path_re.search(line)
+                if m:
+                    # JSON format: extract Path field
+                    path = m.group(1).strip("/")
+                else:
+                    # Plain text format: the whole line is the path
+                    path = line.strip("/")
+                if path and path in self._path_info:
+                    paths.append(path)
+            return paths
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+    def _search_python(self, term: str, limit: int) -> list[str]:
+        """Fallback substring search using pre-lowercased in-memory index."""
+        term_lower = term.lower()
+        paths_lower = self.all_paths_lower
+        candidates = self.all_paths
+
+        exact_matches: list[str] = []
         for i, path_lower in enumerate(paths_lower):
-            if term in path_lower:
+            if term_lower in path_lower:
                 exact_matches.append(candidates[i])
                 if len(exact_matches) >= limit:
                     break
 
-        # If any exact matches found, return them - no fuzzy needed
         if exact_matches:
             return exact_matches[:limit]
 
-        # No exact matches: fuzzy search only on filenames to avoid scanning 3M full paths
-        # Cap to 200k candidates to prevent CPU overload for very rare queries
+        # No exact matches: fuzzy on filenames only, capped to avoid CPU overload
         cap = min(len(candidates), 200_000)
         fuzzy_candidates = candidates[:cap]
         names = [p.rsplit("/", 1)[-1] if "/" in p else p for p in fuzzy_candidates]
 
         fuzzy_results = process.extract(
-            term,
+            term_lower,
             names,
             scorer=fuzz.partial_ratio,
             limit=limit,
             score_cutoff=65,
         )
-
         return [fuzzy_candidates[idx] for _, _score, idx in fuzzy_results]
 
     def expand_selection(self, paths: list[str]) -> list[str]:
