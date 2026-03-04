@@ -957,14 +957,16 @@ class MyrientBrowser(App):
         self, query: str, nodes: list, label: str, preserve_cursor: bool
     ) -> None:
         """Apply search results to UI (must be called from main thread)."""
-        # Discard stale results if user kept typing
         if query != self.search_query:
             return
         self._populate_list(nodes, label, preserve_cursor)
 
-    def _populate_list(self, nodes: list, path_label: str, preserve_cursor: bool = False) -> None:
-        """Populate the file list with nodes and update UI (main thread only).
+    @work(exclusive=True)
+    async def _populate_list(self, nodes: list, path_label: str, preserve_cursor: bool = False) -> None:
+        """Populate the file list with nodes and update UI.
 
+        Runs as an exclusive async worker so concurrent calls are cancelled,
+        preventing stale-widget crashes (ListView.clear() is async in Textual).
         Large directories are paginated to LIST_PAGE_SIZE items.
         """
         list_view = self.query_one("#file-list", ListView)
@@ -994,10 +996,11 @@ class MyrientBrowser(App):
             size = (self.index.get_dir_size(node.path) if node.is_dir else node.size) if has_sizes else -1
             items.append(PathItem(node, selected=is_selected, download_status=status, size=size))
 
-        with self.batch_update():
-            list_view.clear()
-            for item in items:
-                list_view.append(item)
+        # Await clear so old widgets are fully removed before new ones are added.
+        # This prevents the ValueError from stale PathItem references in _nodes.
+        await list_view.clear()
+        if items:
+            await list_view.mount(*items)
 
         if old_index is not None and page_nodes:
             list_view.index = min(old_index, len(page_nodes) - 1)
