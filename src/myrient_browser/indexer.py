@@ -132,6 +132,7 @@ class FileIndex:
         self._on_reload_callbacks: list[Callable[[], None]] = []
         self._has_sizes = False
         self._tree_built = False
+        self._dir_size_cache: dict[str, int] = {}
 
     @property
     def has_sizes(self) -> bool:
@@ -151,6 +152,7 @@ class FileIndex:
             self.path_to_node = {"": self.root}
             self._path_info = {}
             self._children_cache = {}
+            self._dir_size_cache = {}
             self._tree_built = False
             
             # Detect format by extension or content
@@ -221,6 +223,18 @@ class FileIndex:
             if parent not in self._children_cache:
                 self._children_cache[parent] = []
             self._children_cache[parent].append(path)
+            
+            # Accumulate size to all parent directories
+            if not is_dir and size > 0:
+                current = parent
+                while True:
+                    if current not in self._dir_size_cache:
+                        self._dir_size_cache[current] = 0
+                    self._dir_size_cache[current] += size
+                    if not current:
+                        break
+                    slash_idx = current.rfind("/")
+                    current = current[:slash_idx] if slash_idx > 0 else ""
 
     def _load_text_index(self, index_path: Path) -> None:
         """Load index from text file (one path per line)."""
@@ -370,9 +384,9 @@ class FileIndex:
         return self._ensure_node(path)
     
     def get_dir_size(self, path: str) -> int:
-        """Get total size of a directory from path info.
+        """Get total size of a directory from cache.
         
-        Returns -1 if any file has unknown size.
+        Returns -1 if sizes not available.
         """
         path = path.strip("/")
         info = self._path_info.get(path)
@@ -383,17 +397,8 @@ class FileIndex:
         if not is_dir:
             return size
         
-        # Sum all files under this directory
-        total = 0
-        prefix = path + "/" if path else ""
-        for p in self.all_paths:
-            if p.startswith(prefix) if prefix else True:
-                p_info = self._path_info.get(p)
-                if p_info and not p_info[0]:  # is file
-                    if p_info[1] < 0:
-                        return -1
-                    total += p_info[1]
-        return total
+        # Use cached directory size
+        return self._dir_size_cache.get(path, 0)
 
     def get_children(self, path: str = "") -> list[IndexNode]:
         """Get children of a directory."""
