@@ -179,11 +179,13 @@ class StateManager:
             if path in self.state.items:
                 item = self.state.items[path]
                 old_status = item.status
+                new_status = kwargs.get("status")
                 for key, value in kwargs.items():
                     if hasattr(item, key):
                         setattr(item, key, value)
-                if "status" in kwargs and kwargs["status"] != old_status:
-                    self._stats_change_status(old_status, item.status)
+                # Update stats if status changed (compare before setattr modified it)
+                if new_status is not None and new_status != old_status:
+                    self._stats_change_status(old_status, new_status)
                 self._dirty = True
 
     def get_item(self, path: str) -> DownloadItem | None:
