@@ -285,9 +285,9 @@ class HelpScreen(ModalScreen[None]):
   [yellow]Paused[/yellow]      Individually paused item
 
 [bold]── Tab switching ────────────────────────────[/bold]
-  [yellow]B[/yellow]           Switch to [underline]B[/underline]rowser tab
-  [yellow]L[/yellow]           Switch to Down[underline]l[/underline]oads tab
-  [yellow]O[/yellow]           Switch to [underline]O[/underline]ptions tab
+  [yellow]B[/yellow]           Switch to [cyan bold]B[/cyan bold]rowser tab
+  [yellow]L[/yellow]           Switch to Down[cyan bold]L[/cyan bold]oads tab
+  [yellow]O[/yellow]           Switch to [cyan bold]O[/cyan bold]ptions tab
 
 [bold]── General ──────────────────────────────────[/bold]
   [yellow]h[/yellow]           Show / close this help
@@ -1677,7 +1677,7 @@ class MyrientBrowser(App):
         with Horizontal():
             with Vertical(id="main-container"):
                 with TabbedContent(id="main-tabs"):
-                    with TabPane("[underline]B[/underline]rowser", id="tab-browser"):
+                    with TabPane("[cyan bold]B[/cyan bold]rowser", id="tab-browser"):
                         with Container(id="browser-panel"):
                             with Container(id="search-container"):
                                 yield Input(
@@ -1690,10 +1690,10 @@ class MyrientBrowser(App):
                             yield Static("", id="path-display")
                             yield ListView(id="file-list")
 
-                    with TabPane("Down[underline]l[/underline]oads", id="tab-downloads"):
+                    with TabPane("Down[cyan bold]L[/cyan bold]oads", id="tab-downloads"):
                         yield DownloadPanel(id="download-panel-content")
 
-                    with TabPane("[underline]O[/underline]ptions", id="tab-settings"):
+                    with TabPane("[cyan bold]O[/cyan bold]ptions", id="tab-settings"):
                         yield SettingsPanel(self.config, id="settings-panel")
 
             with Vertical(id="side-panel"):
