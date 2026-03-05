@@ -1503,7 +1503,7 @@ class MyrientBrowser(App):
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("u", "promote_selected", "Move to front", show=False),
-        Binding("F", "force_redownload", "Force re-download", show=False),
+        Binding("shift+f", "force_redownload", "Force re-download", show=False),
         Binding("x", "remove_download", "Remove", show=False),
         Binding("f", "retry_all_failed", "Retry All", show=False),
         Binding("k", "clear_completed", "Clear Done", show=False),
@@ -2576,7 +2576,9 @@ class MyrientBrowser(App):
 
         Works in both Downloads tab (selected row) and Browser tab (highlighted file).
         """
+        logger.info(f"action_force_redownload called: downloads={self._is_downloads_tab()}, browser={self._is_browser_tab()}")
         if not self.downloader:
+            logger.warning("action_force_redownload: no downloader")
             return
         try:
             if self._is_downloads_tab():
@@ -2598,11 +2600,13 @@ class MyrientBrowser(App):
                     list_view = self.query_one("#file-list", ListView)
                     if list_view.highlighted_child and isinstance(list_view.highlighted_child, PathItem):
                         paths = [list_view.highlighted_child.node.path]
+                logger.info(f"action_force_redownload: paths={paths}")
                 if not paths or not self.index:
                     self.notify("Nothing selected", severity="warning")
                     return
                 # Expand directories to files
                 expanded = self.index.expand_selection(paths)
+                logger.info(f"action_force_redownload: expanded to {len(expanded)} files")
                 if not expanded:
                     self.notify("No files to download", severity="warning")
                     return
@@ -2626,6 +2630,8 @@ class MyrientBrowser(App):
                     self.notify(f"↑ Force re-download: {count} file(s) queued", severity="warning")
                     self.update_stats()
         except Exception as e:
+            import traceback
+            logger.error(f"action_force_redownload error: {e}\n{traceback.format_exc()}")
             self.notify(f"Error: {e}", severity="error")
 
     def action_concurrency_up(self) -> None:
