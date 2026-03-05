@@ -1997,10 +1997,10 @@ class MyrientBrowser(App):
             end = min(start + page_size, total)
             page_items = items[start:end]
 
-            # Sizes must be computed from the FULL filtered list, not just the
-            # current page, so that Total/Remaining reflect all queued work.
-            all_total_size = sum(i.total_size for i in items if i.total_size > 0)
-            all_downloaded_size = sum(i.downloaded_size for i in items)
+            # Sizes must be computed from ALL items (not filtered), so that
+            # Total/Remaining always reflect the entire queue state.
+            all_total_size = sum(i.total_size for i in all_items if i.total_size > 0)
+            all_downloaded_size = sum(i.downloaded_size for i in all_items)
 
             # Build stats for summary
             filtered_stats = stats.copy()
