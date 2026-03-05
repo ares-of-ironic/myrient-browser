@@ -115,7 +115,7 @@ class DownloadManager:
         self._throttled_until = 0.0
         logger.info("Throttle cleared by user")
         # Kick the queue loop in case it's sleeping
-        if self._running and not self._paused_all:
+        if self._running and not self._queue_paused:
             asyncio.create_task(self._process_queue())
 
     @property
