@@ -1810,7 +1810,7 @@ class MyrientBrowser(App):
         """Run search in a background thread, then update UI from main thread."""
         if not self.index:
             return
-        nodes = self.index.search(query, limit=200)
+        nodes = self.index.search(query)  # uses config.index.search_limit (default 500)
         if self.show_only_missing:
             nodes = [n for n in nodes if check_download_status(self.config, n.path) != "DOWNLOADED"]
         label = f"Search: {query} ({len(nodes)} results)"
