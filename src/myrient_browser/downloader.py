@@ -104,6 +104,18 @@ class DownloadManager:
         """Seconds until server-imposed throttle expires (0 if not throttled)."""
         return max(0.0, self._throttled_until - time.time())
 
+    def clear_throttle(self) -> None:
+        """Manually cancel the server-imposed throttle and restart the queue loop.
+
+        Use when you know the rate-limit window has passed or you want to retry
+        earlier at your own risk.
+        """
+        self._throttled_until = 0.0
+        logger.info("Throttle cleared by user")
+        # Kick the queue loop in case it's sleeping
+        if self._running and not self._paused_all:
+            asyncio.create_task(self._process_queue())
+
     @property
     def paused_all(self) -> bool:
         """True when the user has globally paused all downloads."""

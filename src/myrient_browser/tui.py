@@ -236,6 +236,7 @@ class HelpScreen(ModalScreen[None]):
   [yellow]+[/yellow] [yellow]-[/yellow]         Increase / decrease concurrent download slots  [dim](1–32)[/dim]
   [yellow]P[/yellow]           [bold]Pause all[/bold] downloads  [dim](keeps queue intact, cancels active transfers)[/dim]
   [yellow]R[/yellow]           [bold]Resume all[/bold] paused downloads
+  [yellow]T[/yellow]           [bold]Clear throttle[/bold]  [dim](skip remaining Rate-limited wait — at your own risk)[/dim]
 
 [bold]── Status indicators ────────────────────────[/bold]
   [cyan]On disk[/cyan]     File already exists locally — will not be re-downloaded unless forced
@@ -788,7 +789,7 @@ class DownloadPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Front  [cyan]F[/] Force  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]+[/][cyan]-[/] Slots  [bold yellow]P[/] Pause all  [bold green]R[/] Resume  [cyan]/[/] Search  [cyan]1-5[/] Filter",
+            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Front  [cyan]F[/] Force  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]+[/][cyan]-[/] Slots  [bold yellow]P[/] Pause all  [bold green]R[/] Resume  [bold magenta]T[/] Clear throttle  [cyan]/[/] Search  [cyan]1-5[/] Filter",
             id="download-help",
         )
         with Horizontal(id="download-filter-row"):
@@ -978,7 +979,10 @@ class DownloadPanel(Static):
                 f"  [bold]P[/bold] pause all)[/dim]"
             )
             if throttle_remaining > 0:
-                slots_text += f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
+                slots_text += (
+                    f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
+                    f"  [dim]([bold magenta]T[/bold magenta] to skip)[/dim]"
+                )
         widget.update(slots_text)
 
     def get_selected_item(self) -> DownloadItem | None:
@@ -1244,6 +1248,7 @@ class MyrientBrowser(App):
         Binding("-", "concurrency_down", "Fewer slots", show=False),
         Binding("P", "pause_all_downloads", "Pause all", show=False),
         Binding("R", "resume_all_downloads", "Resume all", show=False),
+        Binding("T", "clear_throttle", "Clear throttle", show=False),
         # ~ / ` handled in on_key (Textual key names: tilde / grave_accent)
     ]
 
@@ -2325,6 +2330,21 @@ class MyrientBrowser(App):
             return
         await self.downloader.resume_all()
         self.notify("▶  Downloads resumed.", severity="information")
+        self.update_download_panel()
+
+    def action_clear_throttle(self) -> None:
+        """Clear server-imposed rate-limit throttle immediately [T]."""
+        if not self._is_downloads_tab() or not self.downloader:
+            return
+        remaining = self.downloader.throttle_remaining
+        if remaining <= 0:
+            self.notify("No active throttle to clear", severity="information")
+            return
+        self.downloader.clear_throttle()
+        self.notify(
+            f"⚡ Throttle cleared ({remaining:.0f}s skipped) — downloads resuming",
+            severity="warning",
+        )
         self.update_download_panel()
 
     def action_promote_selected(self) -> None:
