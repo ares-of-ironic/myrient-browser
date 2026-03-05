@@ -27,7 +27,7 @@ class DownloadConfig:
     retries: int = 3
     retry_delay: float = 2.0
     max_retry_delay: float = 60.0
-    chunk_size: int = 8388608  # 8 MB — larger chunks reduce syscall overhead
+    chunk_size: int = 524288   # 512 KB — good balance of syscall overhead vs progress granularity
     timeout: int = 60
     rate_limit: float = 0
     segments_per_file: int = 4     # parallel HTTP Range segments per file (1 = off)

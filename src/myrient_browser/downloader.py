@@ -77,6 +77,7 @@ class DownloadManager:
         self.on_error = on_error
 
         self._running = False
+        self._paused_all = False     # True when user explicitly pauses ALL downloads
         self._semaphore: asyncio.Semaphore | None = None
         self._tasks: dict[str, asyncio.Task] = {}
         self._client: httpx.AsyncClient | None = None
@@ -102,6 +103,56 @@ class DownloadManager:
     def throttle_remaining(self) -> float:
         """Seconds until server-imposed throttle expires (0 if not throttled)."""
         return max(0.0, self._throttled_until - time.time())
+
+    @property
+    def paused_all(self) -> bool:
+        """True when the user has globally paused all downloads."""
+        return self._paused_all
+
+    async def pause_all(self) -> None:
+        """Pause all active downloads and stop accepting new ones.
+
+        In-flight downloads are cancelled and their items are marked PAUSED.
+        The download queue is preserved — call resume_all() to continue.
+        """
+        if self._paused_all:
+            return
+        self._paused_all = True
+        logger.info("Pausing all downloads")
+
+        # Cancel every active download task
+        for path, task in list(self._tasks.items()):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._tasks.clear()
+
+        # Mark all DOWNLOADING items as PAUSED so the queue doesn't restart them
+        for item in self.state.get_downloading_items():
+            self.state.update_item(item.path, status=DownloadStatus.PAUSED)
+        self.state.save(force=True)
+        logger.info("All downloads paused")
+
+    async def resume_all(self) -> None:
+        """Resume all paused downloads.
+
+        PAUSED items are moved back to QUEUED and the download loop resumes.
+        """
+        if not self._paused_all:
+            return
+        self._paused_all = False
+        logger.info("Resuming all downloads")
+
+        # Move every PAUSED item back to QUEUED
+        for item in self.state.get_items_by_status(DownloadStatus.PAUSED):
+            self.state.update_item(item.path, status=DownloadStatus.QUEUED)
+        self.state.save(force=True)
+
+        # Kick off the queue processor again
+        asyncio.create_task(self._process_queue())
+        logger.info("Downloads resumed")
 
     def set_concurrency(self, value: int) -> int:
         """Change the number of parallel downloads while running.
@@ -134,6 +185,10 @@ class DownloadManager:
         # Reset orphaned downloads (stuck in DOWNLOADING from previous run)
         self._reset_orphaned_downloads()
 
+        segs = self.config.download.segments_per_file
+        # Each concurrent download may open `segs` parallel segment connections.
+        # Add a few extra for HEAD probes and retries.
+        max_conn = self._concurrency * (segs + 2) + 4
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 self.config.download.timeout,
@@ -142,13 +197,16 @@ class DownloadManager:
             ),
             headers={
                 "User-Agent": self.config.server.user_agent,
-                "Accept-Encoding": "identity",  # Disable compression for binary files
+                "Accept-Encoding": "identity",  # binary files — no compression
             },
             follow_redirects=True,
-            http2=True,
+            # HTTP/2 uses a 64 KB flow-control window per stream which caps
+            # throughput to ~(64 KB / RTT).  HTTP/1.1 lets TCP manage the window
+            # (typically 4-16 MB) and matches wget/curl performance.
+            http2=False,
             limits=httpx.Limits(
-                max_connections=self.config.download.concurrency * 2,
-                max_keepalive_connections=self.config.download.concurrency,
+                max_connections=max_conn,
+                max_keepalive_connections=self._concurrency * (segs + 1),
             ),
         )
 
@@ -309,9 +367,10 @@ class DownloadManager:
         """Process queued downloads using a slot-based approach.
 
         Only fills available concurrency slots with the highest-priority items.
-        Respects throttle windows triggered by 429/503 responses.
+        Respects throttle windows triggered by 429/503 responses and the
+        global pause flag set by pause_all().
         """
-        while self._running:
+        while self._running and not self._paused_all:
             # Wait out any server-imposed throttle before starting new downloads
             now = time.time()
             if self._throttled_until > now:
@@ -487,7 +546,7 @@ class DownloadManager:
         resuming_segs = seg0.exists()
 
         if n_segs > 1 or resuming_segs:
-            total_size, accepts_ranges = await self._probe_server(url)
+            total_size, accepts_ranges, final_url = await self._probe_server(url)
 
             if accepts_ranges and total_size > 0:
                 if total_size >= min_bytes or resuming_segs:
@@ -503,26 +562,36 @@ class DownloadManager:
                         effective = min(n_segs, max(1, math.ceil(total_size / min_bytes)))
 
                     if effective > 1:
+                        # Use final_url so segments hit the CDN directly
                         await self._do_segmented_download(
-                            item, part_path, url, total_size, effective
+                            item, part_path, final_url, total_size, effective
                         )
                         return
+        else:
+            # Single-stream but probe anyway to get the CDN URL
+            _, _, final_url = await self._probe_server(url)
+            url = final_url
 
         await self._do_single_stream(item, part_path, resume_pos, url)
 
-    async def _probe_server(self, url: str) -> tuple[int, bool]:
-        """HEAD request to discover Content-Length and Range support.
+    async def _probe_server(self, url: str) -> tuple[int, bool, str]:
+        """HEAD request to discover Content-Length, Range support, and final URL.
 
-        Returns (content_length, accepts_byte_ranges).
-        Falls back to (0, False) on any error.
+        Following redirects once here means every segment/stream request can
+        use the final CDN URL directly — no per-request 302 round-trip.
+
+        Returns (content_length, accepts_byte_ranges, final_url).
+        Falls back to (0, False, url) on any error.
         """
         try:
             r = await self._client.head(url, timeout=httpx.Timeout(10.0))
             size = int(r.headers.get("content-length", 0))
             accepts = r.headers.get("accept-ranges", "").lower() == "bytes"
-            return size, accepts
+            # r.url is the URL of the final response (after redirects)
+            final_url = str(r.url)
+            return size, accepts, final_url
         except Exception:
-            return 0, False
+            return 0, False, url
 
     async def _do_segmented_download(
         self,

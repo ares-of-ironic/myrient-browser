@@ -24,9 +24,10 @@ retry_delay = 2.0
 # Maximum retry delay in seconds
 max_retry_delay = 60.0
 
-# Chunk size for streaming downloads (bytes)
-# Larger chunks = faster downloads but more memory usage
-chunk_size = 8388608  # 8MB
+# Chunk size for streaming downloads (bytes).
+# Smaller = smoother progress bar; larger = fewer write syscalls.
+# 512 KB is a good default; increase to 2-4 MB on very fast connections.
+chunk_size = 524288  # 512 KB
 
 # Connection timeout in seconds
 timeout = 30

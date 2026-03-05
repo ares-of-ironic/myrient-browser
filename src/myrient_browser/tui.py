@@ -234,6 +234,8 @@ class HelpScreen(ModalScreen[None]):
   [yellow]k[/yellow]           Clear all completed downloads
   [yellow]X[/yellow]           Clear entire queue  [dim](confirmation required)[/dim]
   [yellow]+[/yellow] [yellow]-[/yellow]         Increase / decrease concurrent download slots  [dim](1–32)[/dim]
+  [yellow]P[/yellow]           [bold]Pause all[/bold] downloads  [dim](keeps queue intact, cancels active transfers)[/dim]
+  [yellow]R[/yellow]           [bold]Resume all[/bold] paused downloads
 
 [bold]── Status indicators ────────────────────────[/bold]
   [cyan]On disk[/cyan]     File already exists locally — will not be re-downloaded unless forced
@@ -241,7 +243,7 @@ class HelpScreen(ModalScreen[None]):
   [dim]Queued[/dim]      Waiting in queue  ([cyan]↑[/cyan] = high priority)
   [green]Done[/green]        Download completed successfully
   [red]Failed[/red]      Download failed (use [yellow]p[/yellow] or [yellow]F[/yellow] to retry)
-  [yellow]Paused[/yellow]      Download paused
+  [yellow]Paused[/yellow]      Individually paused item
 
 [bold]── General ──────────────────────────────────[/bold]
   [yellow]h[/yellow]           Show / close this help
@@ -786,7 +788,7 @@ class DownloadPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Front  [cyan]F[/] Force  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]+[/][cyan]-[/] Slots  [cyan]/[/] Search  [cyan]1-5[/] Filter",
+            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Front  [cyan]F[/] Force  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]+[/][cyan]-[/] Slots  [bold yellow]P[/] Pause all  [bold green]R[/] Resume  [cyan]/[/] Search  [cyan]1-5[/] Filter",
             id="download-help",
         )
         with Horizontal(id="download-filter-row"):
@@ -955,13 +957,28 @@ class DownloadPanel(Static):
                 # Add new row
                 table.add_row(*row_data, key=item.path)
 
-    def update_concurrency(self, concurrency: int, throttle_remaining: float = 0.0) -> None:
-        """Update the concurrency indicator line."""
+    def update_concurrency(
+        self,
+        concurrency: int,
+        throttle_remaining: float = 0.0,
+        paused_all: bool = False,
+    ) -> None:
+        """Update the concurrency / pause indicator line."""
         widget = self.query_one("#download-concurrency", Static)
-        bar = "█" * concurrency + "░" * max(0, 16 - concurrency)
-        slots_text = f"[bold]Slots:[/bold] [cyan]{bar}[/cyan] [cyan bold]{concurrency}[/cyan bold]  [dim]([cyan]-[/cyan] / [cyan]+[/cyan] to change, max {CONCURRENCY_MAX})[/dim]"
-        if throttle_remaining > 0:
-            slots_text += f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
+        if paused_all:
+            slots_text = (
+                "[bold yellow on dark_orange] ⏸  ALL DOWNLOADS PAUSED [/bold yellow on dark_orange]"
+                "  [dim]Press [bold]R[/bold] to resume[/dim]"
+            )
+        else:
+            bar = "█" * concurrency + "░" * max(0, 16 - concurrency)
+            slots_text = (
+                f"[bold]Slots:[/bold] [cyan]{bar}[/cyan] [cyan bold]{concurrency}[/cyan bold]"
+                f"  [dim]([cyan]-[/cyan] / [cyan]+[/cyan] to change, max {CONCURRENCY_MAX}"
+                f"  [bold]P[/bold] pause all)[/dim]"
+            )
+            if throttle_remaining > 0:
+                slots_text += f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
         widget.update(slots_text)
 
     def get_selected_item(self) -> DownloadItem | None:
@@ -1225,6 +1242,8 @@ class MyrientBrowser(App):
         Binding("5", "filter_failed", "Failed", show=False),
         Binding("+", "concurrency_up", "More slots", show=False),
         Binding("-", "concurrency_down", "Fewer slots", show=False),
+        Binding("P", "pause_all_downloads", "Pause all", show=False),
+        Binding("R", "resume_all_downloads", "Resume all", show=False),
         # ~ / ` handled in on_key (Textual key names: tilde / grave_accent)
     ]
 
@@ -1675,6 +1694,7 @@ class MyrientBrowser(App):
                 panel.update_concurrency(
                     self.downloader.concurrency,
                     self.downloader.throttle_remaining,
+                    self.downloader.paused_all,
                 )
 
             self.update_stats()
@@ -2280,6 +2300,31 @@ class MyrientBrowser(App):
             return
         new = self.downloader.set_concurrency(self.downloader.concurrency - 1)
         self.notify(f"Concurrency → {new}", severity="information")
+        self.update_download_panel()
+
+    async def action_pause_all_downloads(self) -> None:
+        """Pause all active downloads without removing them from the queue [P]."""
+        if not self._is_downloads_tab() or not self.downloader:
+            return
+        if self.downloader.paused_all:
+            self.notify("Downloads already paused — press R to resume", severity="warning")
+            return
+        await self.downloader.pause_all()
+        self.notify(
+            "⏸  All downloads paused.  Press [R] to resume.",
+            severity="warning",
+        )
+        self.update_download_panel()
+
+    async def action_resume_all_downloads(self) -> None:
+        """Resume all paused downloads [R]."""
+        if not self._is_downloads_tab() or not self.downloader:
+            return
+        if not self.downloader.paused_all:
+            self.notify("Downloads are not paused", severity="information")
+            return
+        await self.downloader.resume_all()
+        self.notify("▶  Downloads resumed.", severity="information")
         self.update_download_panel()
 
     def action_promote_selected(self) -> None:
