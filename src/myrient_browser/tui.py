@@ -791,6 +791,10 @@ class DownloadPanel(Static):
         self.items_list: list[DownloadItem] = []
         self.search_query: str = ""
         self.status_filter: str = "all"
+        # Cache for row data to avoid redundant updates
+        self._row_cache: dict[str, tuple] = {}
+        self._last_summary: str = ""
+        self._last_concurrency: tuple[int, int, bool] = (-1, -1, False)  # (concurrency, throttle_int, paused)
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -895,7 +899,11 @@ class DownloadPanel(Static):
         elif page_info:
             summary_parts.insert(0, page_info)
         
-        summary_widget.update(" | ".join(summary_parts) if summary_parts else "No downloads")
+        # Only update summary if changed
+        new_summary = " | ".join(summary_parts) if summary_parts else "No downloads"
+        if new_summary != self._last_summary:
+            summary_widget.update(new_summary)
+            self._last_summary = new_summary
         
         # Build new row data
         new_rows: dict[str, tuple] = {}
@@ -955,17 +963,24 @@ class DownloadPanel(Static):
         # Remove rows that no longer exist
         for key in current_keys - new_keys:
             table.remove_row(key)
+            self._row_cache.pop(key, None)
         
-        # Update existing rows or add new ones
-        for idx, item in enumerate(items):
+        # Update existing rows or add new ones — only update changed cells
+        for item in items:
             row_data = new_rows[item.path]
+            cached = self._row_cache.get(item.path)
+            
             if item.path in current_keys:
-                # Update existing row
-                for col_idx, value in enumerate(row_data):
-                    table.update_cell(item.path, table.columns[col_idx].key, value)
+                # Update only changed cells
+                if cached != row_data:
+                    for col_idx, value in enumerate(row_data):
+                        if cached is None or cached[col_idx] != value:
+                            table.update_cell(item.path, table.columns[col_idx].key, value)
+                    self._row_cache[item.path] = row_data
             else:
                 # Add new row
                 table.add_row(*row_data, key=item.path)
+                self._row_cache[item.path] = row_data
 
     def update_concurrency(
         self,
@@ -974,6 +989,13 @@ class DownloadPanel(Static):
         paused_all: bool = False,
     ) -> None:
         """Update the concurrency / pause indicator line."""
+        # Only update if values changed (throttle rounded to avoid flicker)
+        throttle_int = int(throttle_remaining)
+        cache_key = (concurrency, throttle_int, paused_all)
+        if cache_key == self._last_concurrency:
+            return
+        self._last_concurrency = cache_key
+
         widget = self.query_one("#download-concurrency", Static)
         if paused_all:
             slots_text = (
@@ -990,7 +1012,7 @@ class DownloadPanel(Static):
             )
             if throttle_remaining > 0:
                 slots_text += (
-                    f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
+                    f"  [yellow bold]⏸ Rate-limited {throttle_int}s[/yellow bold]"
                     f"  [dim]([bold magenta]T[/bold magenta] to skip)[/dim]"
                 )
         widget.update(slots_text)
@@ -1566,6 +1588,7 @@ class MyrientBrowser(App):
         self._list_page: int = 0  # Current page for large directories
         self._download_page: int = 0  # Current page for Downloads tab
         self._download_all_items: list = []  # Full unfiltered+filtered list for pagination
+        self._last_stats_text: str = ""  # Cache for stats panel
 
         if index is not None:
             self.index_loading = False
@@ -1638,7 +1661,7 @@ class MyrientBrowser(App):
 
         # Start downloader immediately (doesn't need index)
         self.start_downloader()
-        self.set_interval(1.0, self.update_download_panel)
+        self.set_interval(0.3, self.update_download_panel)  # 300ms for responsive UI
         # Kick off du refresh; first call is immediate, then every 15 s
         self._refresh_du()
         self.set_interval(15.0, self._refresh_du)
@@ -1911,7 +1934,10 @@ class MyrientBrowser(App):
             f"{du_line}"
         )
 
-        stats_panel.update(stats)
+        # Only update if changed
+        if stats != self._last_stats_text:
+            stats_panel.update(stats)
+            self._last_stats_text = stats
 
     def update_download_panel(self, reset_page: bool = False) -> None:
         """Update download panel with search, status filtering and pagination."""
