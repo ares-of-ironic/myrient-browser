@@ -1339,8 +1339,10 @@ class MyrientBrowser(App):
     def _refresh_du(self) -> None:
         """Run `du [-h] -s <downloads_dir>` in a background thread and cache result."""
         try:
-            dl_dir = Path(self.config.download.directory)
+            dl_dir = self.config.get_download_dir()
             if not dl_dir.exists():
+                self._du_result = "0 B (empty)"
+                self.call_from_thread(self.update_stats)
                 return
             use_h = getattr(self.config.display, "du_human_readable", False)
             args = ["du", "-sh", str(dl_dir)] if use_h else ["du", "-s", str(dl_dir)]
