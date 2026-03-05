@@ -241,10 +241,11 @@ class StateManager:
         """Remove all completed items. Returns count removed."""
         with self._lock:
             to_remove = [
-                path for path, item in self.state.items.items()
+                (path, item) for path, item in self.state.items.items()
                 if item.status == DownloadStatus.COMPLETED
             ]
-            for path in to_remove:
+            for path, item in to_remove:
+                self._stats_remove(item)
                 del self.state.items[path]
             if to_remove:
                 self._dirty = True
@@ -254,10 +255,11 @@ class StateManager:
         """Remove all failed items. Returns count removed."""
         with self._lock:
             to_remove = [
-                path for path, item in self.state.items.items()
+                (path, item) for path, item in self.state.items.items()
                 if item.status == DownloadStatus.FAILED
             ]
-            for path in to_remove:
+            for path, item in to_remove:
+                self._stats_remove(item)
                 del self.state.items[path]
             if to_remove:
                 self._dirty = True
@@ -269,6 +271,7 @@ class StateManager:
             count = 0
             for item in self.state.items.values():
                 if item.status == DownloadStatus.FAILED:
+                    self._stats_change_status(DownloadStatus.FAILED, DownloadStatus.QUEUED)
                     item.status = DownloadStatus.QUEUED
                     item.error = ""
                     item.retries = 0

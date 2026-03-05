@@ -2382,7 +2382,10 @@ class MyrientBrowser(App):
         count = self.state.retry_failed()
         if count > 0:
             self.state.save(force=True)
+            if self.downloader:
+                asyncio.create_task(self.downloader._process_queue())
             self.notify(f"Retrying {count} failed downloads")
+            self.update_download_panel()
         else:
             self.notify("No failed downloads to retry", severity="warning")
 
@@ -2394,6 +2397,7 @@ class MyrientBrowser(App):
         if count > 0:
             self.state.save(force=True)
             self.notify(f"Cleared {count} completed downloads")
+            self.update_download_panel()
         else:
             self.notify("No completed downloads to clear", severity="warning")
 
