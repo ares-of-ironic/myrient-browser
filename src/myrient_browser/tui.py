@@ -2947,14 +2947,22 @@ class MyrientBrowser(App):
         except Exception as exc:
             panel.show_status(f"✗ Reload failed: {exc}", style="red")
 
-    async def action_quit(self) -> None:
-        """Quit application."""
-        if self.downloader:
-            await self.downloader.stop()
-        self.state.save(force=True)
-        if self.index:
-            self.index.stop_watcher()
-        self.exit()
+    def action_quit(self) -> None:
+        """Show quit confirmation dialog."""
+        self.push_screen(
+            ConfirmDialog("Are you sure you want to quit?", "Quit"),
+            self._handle_quit_confirm,
+        )
+
+    async def _handle_quit_confirm(self, confirmed: bool) -> None:
+        """Handle quit confirmation result."""
+        if confirmed:
+            if self.downloader:
+                await self.downloader.stop()
+            self.state.save(force=True)
+            if self.index:
+                self.index.stop_watcher()
+            self.exit()
 
 
 def run_tui(config: Config, index: FileIndex | None, state: StateManager) -> None:
