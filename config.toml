@@ -13,13 +13,13 @@ user_agent = "MyrientBrowser/1.0"
 download_dir = "downloads"
 
 # Number of concurrent downloads
-concurrency = 4
+concurrency = 9
 
 # Number of retry attempts for failed downloads
-retries = 3
+retries = 5
 
 # Delay between retries in seconds (exponential backoff multiplier)
-retry_delay = 2.0
+retry_delay = 10.0
 
 # Maximum retry delay in seconds
 max_retry_delay = 60.0

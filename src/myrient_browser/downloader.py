@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import random
+import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -15,6 +19,44 @@ from .config import Config
 from .state import DownloadItem, DownloadStatus, StateManager
 
 logger = logging.getLogger(__name__)
+
+# Concurrency limits
+CONCURRENCY_MIN = 1
+CONCURRENCY_MAX = 32
+
+# Assembly read buffer — 64 MB at a time to avoid RAM spike on huge files
+_ASSEMBLE_CHUNK = 64 * 1024 * 1024
+
+
+@dataclass
+class _Seg:
+    """State for a single HTTP Range segment."""
+    idx: int
+    start: int   # first byte (absolute)
+    end: int     # last  byte (absolute, inclusive)
+    path: Path   # temporary .segN file
+    resume: int = 0    # bytes already on disk for this segment
+    done: bool = field(default=False, repr=False)
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start + 1
+
+
+def _seg_path(part_path: Path, idx: int) -> Path:
+    """Return .segN sidecar path next to the .part file."""
+    return part_path.with_suffix(f".seg{idx}")
+
+# Backoff settings for 429 / 503
+_429_BASE_DELAY = 30.0    # minimum wait on rate-limit response
+_429_MAX_DELAY  = 300.0   # cap at 5 min
+_JITTER_FACTOR  = 0.25    # ±25 % randomisation on every retry delay
+
+
+def _add_jitter(delay: float) -> float:
+    """Return delay ± JITTER_FACTOR to avoid thundering-herd retries."""
+    spread = delay * _JITTER_FACTOR
+    return delay + random.uniform(-spread, spread)
 
 
 class DownloadManager:
@@ -42,13 +84,49 @@ class DownloadManager:
         self._last_request_time: float = 0
         self._queue_task: asyncio.Task | None = None
 
+        # Live concurrency — may differ from config after set_concurrency()
+        self._concurrency: int = config.download.concurrency
+        # Throttle flag: set when server returns 429/503 to pause new slots
+        self._throttled_until: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Public: live concurrency control
+    # ------------------------------------------------------------------
+
+    @property
+    def concurrency(self) -> int:
+        """Current active concurrency limit."""
+        return self._concurrency
+
+    @property
+    def throttle_remaining(self) -> float:
+        """Seconds until server-imposed throttle expires (0 if not throttled)."""
+        return max(0.0, self._throttled_until - time.time())
+
+    def set_concurrency(self, value: int) -> int:
+        """Change the number of parallel downloads while running.
+
+        The new semaphore takes effect on the next queue cycle; in-flight
+        tasks finish normally.  Returns the clamped value that was applied.
+        """
+        value = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, value))
+        self._concurrency = value
+        self._semaphore = asyncio.Semaphore(value)
+        logger.info(f"Concurrency changed to {value}")
+        return value
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def start(self) -> None:
         """Start the download manager."""
         if self._running:
             return
 
         self._running = True
-        self._semaphore = asyncio.Semaphore(self.config.download.concurrency)
+        self._concurrency = self.config.download.concurrency
+        self._semaphore = asyncio.Semaphore(self._concurrency)
 
         if self.config.download.rate_limit > 0:
             self._rate_limiter = asyncio.Semaphore(1)
@@ -119,47 +197,129 @@ class DownloadManager:
         paths: list[str],
         expanded_from: str = "",
         sizes: dict[str, int] | None = None,
-    ) -> int:
+    ) -> tuple[int, int]:
         """Add paths to download queue.
 
-        Returns number of items added.
+        Checks whether each file already exists locally; if so it is added with
+        status ALREADY_DOWNLOADED and skipped by the downloader unless explicitly
+        forced via force_redownload().
+
+        Returns:
+            (added_new, already_present) – counts of truly new items and items
+            that were found on disk (and added as ALREADY_DOWNLOADED).
         """
-        added = 0
+        added_new = 0
+        already_present = 0
         for path in paths:
             if self.state.get_item(path) is not None:
                 continue
 
             url = self.config.build_url(path)
-            local_path = str(self.config.get_local_path(path))
+            lp = self.config.get_local_path(path)
+            local_path = str(lp)
             total_size = (sizes.get(path, 0) if sizes else 0) or 0
 
-            item = DownloadItem(
-                path=path,
-                url=url,
-                local_path=local_path,
-                expanded_from=expanded_from,
-                total_size=total_size,
-            )
-            self.state.add_item(item)
-            added += 1
+            # Check whether the file is already on disk
+            if lp.exists() and lp.stat().st_size > 0:
+                local_size = lp.stat().st_size
+                item = DownloadItem(
+                    path=path,
+                    url=url,
+                    local_path=local_path,
+                    expanded_from=expanded_from,
+                    total_size=total_size or local_size,
+                    downloaded_size=local_size,
+                    progress=100.0,
+                    status=DownloadStatus.ALREADY_DOWNLOADED,
+                    local_size=local_size,
+                )
+                self.state.add_item(item)
+                already_present += 1
+            else:
+                item = DownloadItem(
+                    path=path,
+                    url=url,
+                    local_path=local_path,
+                    expanded_from=expanded_from,
+                    total_size=total_size,
+                )
+                self.state.add_item(item)
+                added_new += 1
 
+        self.state.save()
+
+        if self._running and added_new > 0:
+            asyncio.create_task(self._process_queue())
+
+        return added_new, already_present
+
+    async def force_redownload(self, path: str) -> bool:
+        """Force re-download of a file regardless of its current status.
+
+        Resets status to QUEUED and clears progress so the downloader picks it
+        up on the next cycle.  Works for ALREADY_DOWNLOADED, COMPLETED, FAILED,
+        and PAUSED items.  Returns True if the item was found and reset.
+        """
+        item = self.state.get_item(path)
+        if item is None:
+            return False
+
+        # Cancel active download task if any
+        task = self._tasks.pop(path, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Remove .part file and any .segN sidecar files so we start fresh
+        lp = Path(item.local_path)
+        part = lp.with_suffix(lp.suffix + ".part")
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        # Glob-remove segment files (.seg0, .seg1, …)
+        for sp in lp.parent.glob(f"{lp.name}.seg*"):
+            try:
+                sp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        self.state.update_item(
+            path,
+            status=DownloadStatus.QUEUED,
+            progress=0.0,
+            downloaded_size=0,
+            speed=0.0,
+            eta=0.0,
+            error="",
+            retries=0,
+            priority=-1,  # put at front of queue
+        )
         self.state.save()
 
         if self._running:
             asyncio.create_task(self._process_queue())
 
-        return added
+        return True
 
     async def _process_queue(self) -> None:
         """Process queued downloads using a slot-based approach.
 
         Only fills available concurrency slots with the highest-priority items.
-        This ensures promoted (high-priority) items are started as soon as a
-        slot frees up, without creating tasks for all 20k+ queued items at once.
+        Respects throttle windows triggered by 429/503 responses.
         """
         while self._running:
+            # Wait out any server-imposed throttle before starting new downloads
+            now = time.time()
+            if self._throttled_until > now:
+                await asyncio.sleep(min(1.0, self._throttled_until - now))
+                continue
+
             active = len(self._tasks)
-            available_slots = self.config.download.concurrency - active
+            available_slots = self._concurrency - active
 
             if available_slots > 0:
                 # get_queued_items() returns items sorted by (priority, added_at)
@@ -236,19 +396,49 @@ class DownloadManager:
                 return
 
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 416:
+                status_code = e.response.status_code
+
+                # Range not satisfiable — partial file is corrupt, restart
+                if status_code == 416:
                     part_path.unlink(missing_ok=True)
                     resume_pos = 0
                     continue
 
-                error_msg = f"HTTP {e.response.status_code}: {e.response.reason_phrase}"
+                error_msg = f"HTTP {status_code}: {e.response.reason_phrase}"
                 retry_count += 1
 
+                # 429 Too Many Requests / 503 Service Unavailable:
+                # honour Retry-After header and throttle all new downloads
+                if status_code in (429, 503):
+                    retry_after = e.response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = float(retry_after)
+                        except ValueError:
+                            wait = _429_BASE_DELAY
+                    else:
+                        wait = min(
+                            _429_BASE_DELAY * (2 ** (retry_count - 1)),
+                            _429_MAX_DELAY,
+                        )
+                    wait = _add_jitter(wait)
+                    self._throttled_until = time.time() + wait
+                    logger.warning(
+                        f"Rate-limited ({status_code}) — throttling {wait:.1f}s, "
+                        f"retry {retry_count}/{max_retries} for {item.path}"
+                    )
+                    if retry_count <= max_retries:
+                        await asyncio.sleep(wait)
+                    else:
+                        await self._handle_failure(item, error_msg)
+                        return
+                    continue
+
                 if retry_count <= max_retries:
-                    delay = min(
+                    delay = _add_jitter(min(
                         self.config.download.retry_delay * (2 ** (retry_count - 1)),
                         self.config.download.max_retry_delay,
-                    )
+                    ))
                     logger.warning(f"Retry {retry_count}/{max_retries} for {item.path}: {error_msg}")
                     await asyncio.sleep(delay)
                 else:
@@ -260,10 +450,10 @@ class DownloadManager:
                 retry_count += 1
 
                 if retry_count <= max_retries:
-                    delay = min(
+                    delay = _add_jitter(min(
                         self.config.download.retry_delay * (2 ** (retry_count - 1)),
                         self.config.download.max_retry_delay,
-                    )
+                    ))
                     logger.warning(f"Retry {retry_count}/{max_retries} for {item.path}: {error_msg}")
                     await asyncio.sleep(delay)
                 else:
@@ -276,13 +466,180 @@ class DownloadManager:
                 self.state.save()
                 raise
 
+    # ------------------------------------------------------------------
+    # Download routing — single-stream vs. segmented
+    # ------------------------------------------------------------------
+
     async def _do_download(
         self,
         item: DownloadItem,
         part_path: Path,
         resume_pos: int,
     ) -> None:
-        """Perform the actual download."""
+        """Route to segmented or single-stream download."""
+        n_segs = self.config.download.segments_per_file
+        min_bytes = int(self.config.download.min_segmented_mb * 1024 * 1024)
+        encoded_path = quote(item.path, safe="/")
+        url = self.config.build_url(encoded_path)
+
+        # Detect leftover segment files from a previous segmented attempt
+        seg0 = _seg_path(part_path, 0)
+        resuming_segs = seg0.exists()
+
+        if n_segs > 1 or resuming_segs:
+            total_size, accepts_ranges = await self._probe_server(url)
+
+            if accepts_ranges and total_size > 0:
+                if total_size >= min_bytes or resuming_segs:
+                    # Determine effective segment count
+                    if resuming_segs:
+                        # Honour the original split so ranges match
+                        effective = 0
+                        while _seg_path(part_path, effective).exists():
+                            effective += 1
+                        if effective == 0:
+                            effective = n_segs
+                    else:
+                        effective = min(n_segs, max(1, math.ceil(total_size / min_bytes)))
+
+                    if effective > 1:
+                        await self._do_segmented_download(
+                            item, part_path, url, total_size, effective
+                        )
+                        return
+
+        await self._do_single_stream(item, part_path, resume_pos, url)
+
+    async def _probe_server(self, url: str) -> tuple[int, bool]:
+        """HEAD request to discover Content-Length and Range support.
+
+        Returns (content_length, accepts_byte_ranges).
+        Falls back to (0, False) on any error.
+        """
+        try:
+            r = await self._client.head(url, timeout=httpx.Timeout(10.0))
+            size = int(r.headers.get("content-length", 0))
+            accepts = r.headers.get("accept-ranges", "").lower() == "bytes"
+            return size, accepts
+        except Exception:
+            return 0, False
+
+    async def _do_segmented_download(
+        self,
+        item: DownloadItem,
+        part_path: Path,
+        url: str,
+        total_size: int,
+        n_segs: int,
+    ) -> None:
+        """Download a file as N parallel HTTP Range segments, then assemble."""
+        seg_size = math.ceil(total_size / n_segs)
+
+        segments: list[_Seg] = []
+        for i in range(n_segs):
+            start = i * seg_size
+            end = min(start + seg_size - 1, total_size - 1)
+            sp = _seg_path(part_path, i)
+            resume = sp.stat().st_size if sp.exists() else 0
+            segments.append(_Seg(i, start, end, sp, resume))
+
+        item.total_size = total_size
+        self.state.update_item(item.path, total_size=total_size)
+
+        # Per-segment byte counters — asyncio is single-threaded so no lock
+        seg_dl: list[int] = [s.resume for s in segments]
+
+        import aiofiles  # noqa: PLC0415
+
+        async def _download_seg(seg: _Seg) -> None:
+            if seg.resume >= seg.length:
+                seg.done = True
+                return
+
+            range_start = seg.start + seg.resume
+            headers = {"Range": f"bytes={range_start}-{seg.end}"}
+
+            # Small stagger so N connections don't all hit the server at once
+            await asyncio.sleep(seg.idx * 0.08)
+
+            mode = "ab" if seg.resume > 0 else "wb"
+            async with self._client.stream("GET", url, headers=headers) as resp:
+                resp.raise_for_status()
+                async with aiofiles.open(seg.path, mode) as f:
+                    async for chunk in resp.aiter_bytes(self.config.download.chunk_size):
+                        if not self._running:
+                            raise asyncio.CancelledError()
+                        await f.write(chunk)
+                        seg_dl[seg.idx] += len(chunk)
+            seg.done = True
+
+        # Monitor: aggregates per-segment counters and updates item every 0.5 s
+        start_time = time.time()
+        initial_dl = sum(seg_dl)
+
+        async def _monitor() -> None:
+            prev_dl = initial_dl
+            prev_t = start_time
+            while not all(s.done for s in segments):
+                await asyncio.sleep(0.5)
+                total_dl = sum(seg_dl)
+                now = time.time()
+                dt = now - prev_t
+                speed = max(0.0, (total_dl - prev_dl) / dt) if dt > 0 else 0.0
+                prev_dl = total_dl
+                prev_t = now
+                progress = total_dl / total_size * 100
+                eta = (total_size - total_dl) / speed if speed > 0 else 0.0
+                item.downloaded_size = total_dl
+                item.progress = progress
+                item.speed = speed
+                item.eta = eta
+                self.state.update_item(
+                    item.path,
+                    downloaded_size=total_dl,
+                    progress=progress,
+                    speed=speed,
+                    eta=eta,
+                )
+                if self.on_progress:
+                    self.on_progress(item)
+
+        tasks = [asyncio.create_task(_download_seg(seg)) for seg in segments]
+        monitor_task = asyncio.create_task(_monitor())
+
+        try:
+            await asyncio.gather(*tasks)
+        except Exception:
+            monitor_task.cancel()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, monitor_task, return_exceptions=True)
+            raise
+
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+        # Assemble segments into the .part file then clean up .segN files
+        logger.info(
+            f"Assembling {n_segs} segments for {item.path} ({total_size:,} bytes)"
+        )
+        with open(part_path, "wb") as out:
+            for seg in segments:
+                with open(seg.path, "rb") as inp:
+                    shutil.copyfileobj(inp, out, _ASSEMBLE_CHUNK)
+                seg.path.unlink(missing_ok=True)
+
+    async def _do_single_stream(
+        self,
+        item: DownloadItem,
+        part_path: Path,
+        resume_pos: int,
+        url: str | None = None,
+    ) -> None:
+        """Single-connection streaming download (original implementation)."""
         if self._rate_limiter:
             async with self._rate_limiter:
                 now = time.time()
@@ -292,12 +649,15 @@ class DownloadManager:
                     await asyncio.sleep(min_interval - elapsed)
                 self._last_request_time = time.time()
 
-        headers = {}
+        headers: dict[str, str] = {}
         if resume_pos > 0:
             headers["Range"] = f"bytes={resume_pos}-"
 
-        encoded_path = quote(item.path, safe="/")
-        url = self.config.build_url(encoded_path)
+        if url is None:
+            encoded_path = quote(item.path, safe="/")
+            url = self.config.build_url(encoded_path)
+
+        import aiofiles  # noqa: PLC0415
 
         async with self._client.stream("GET", url, headers=headers) as response:
             response.raise_for_status()
@@ -316,7 +676,6 @@ class DownloadManager:
             start_time = time.time()
             last_update = start_time
 
-            import aiofiles
             async with aiofiles.open(part_path, mode) as f:
                 async for chunk in response.aiter_bytes(self.config.download.chunk_size):
                     if not self._running:

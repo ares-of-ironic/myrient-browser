@@ -21,6 +21,7 @@ class DownloadStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
+    ALREADY_DOWNLOADED = "already_downloaded"  # file exists locally; skipped unless forced
 
 
 @dataclass
@@ -43,6 +44,7 @@ class DownloadItem:
     completed_at: float = 0.0
     expanded_from: str = ""
     priority: int = 0  # lower = downloaded sooner; 0 = normal, negative = high priority
+    local_size: int = 0  # size of existing local file at queue-add time (0 if absent)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -55,7 +57,8 @@ class DownloadItem:
         """Create from dictionary."""
         data = data.copy()
         data["status"] = DownloadStatus(data.get("status", "queued"))
-        data.setdefault("priority", 0)  # backwards-compatible load
+        data.setdefault("priority", 0)    # backwards-compatible load
+        data.setdefault("local_size", 0)  # backwards-compatible load
         return cls(**data)
 
 
@@ -101,7 +104,7 @@ class StateManager:
 
     def _rebuild_stats(self) -> None:
         """Rebuild stats cache from scratch (call while holding _lock)."""
-        self._stats = {s: 0 for s in ("total", "queued", "downloading", "completed", "failed", "paused")}
+        self._stats = {s: 0 for s in ("total", "queued", "downloading", "completed", "failed", "paused", "already_downloaded")}
         for item in self.state.items.values():
             self._stats["total"] += 1
             self._stats[item.status.value] += 1

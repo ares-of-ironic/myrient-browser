@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import random
+from itertools import cycle as _icycle
 from pathlib import Path
 from typing import ClassVar
 
@@ -15,6 +18,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     DataTable,
@@ -32,7 +36,7 @@ from textual.widgets import (
 )
 
 from .config import Config
-from .downloader import DownloadManager, check_download_status
+from .downloader import CONCURRENCY_MAX, CONCURRENCY_MIN, DownloadManager, check_download_status
 from .exporter import Exporter
 from .indexer import FileIndex, IndexNode, format_size as _format_size_base
 from .state import DownloadItem, DownloadStatus, StateManager
@@ -218,16 +222,28 @@ class HelpScreen(ModalScreen[None]):
 [bold]── Downloads tab ────────────────────────────[/bold]
   [yellow]/[/yellow]           Focus search input
   [yellow]Escape[/yellow]      Clear search and filters
+  [yellow]][/yellow] [yellow][][/yellow]        Next / previous page  [dim](500 items/page)[/dim]
   [yellow]1[/yellow]-[yellow]5[/yellow]         Filter: All / Queued / Active / Done / Failed
   [yellow]p[/yellow]           Retry / restart selected  [dim](jumps to front of queue)[/dim]
   [yellow]u[/yellow]           Move selected queued item to front of queue
+  [yellow]F[/yellow]           Force re-download  [dim](works for "On disk" / Done / any status)[/dim]
   [yellow]x[/yellow]           Remove selected from queue
   [yellow]f[/yellow]           Retry all failed downloads
   [yellow]k[/yellow]           Clear all completed downloads
   [yellow]X[/yellow]           Clear entire queue  [dim](confirmation required)[/dim]
+  [yellow]+[/yellow] [yellow]-[/yellow]         Increase / decrease concurrent download slots  [dim](1–32)[/dim]
+
+[bold]── Status indicators ────────────────────────[/bold]
+  [cyan]On disk[/cyan]     File already exists locally — will not be re-downloaded unless forced
+  [blue]Downloading[/blue] Transfer in progress
+  [dim]Queued[/dim]      Waiting in queue  ([cyan]↑[/cyan] = high priority)
+  [green]Done[/green]        Download completed successfully
+  [red]Failed[/red]      Download failed (use [yellow]p[/yellow] or [yellow]F[/yellow] to retry)
+  [yellow]Paused[/yellow]      Download paused
 
 [bold]── General ──────────────────────────────────[/bold]
   [yellow]h[/yellow]           Show / close this help
+  [yellow]~[/yellow]           Screensaver  [dim](press any key to return)[/dim]
   [yellow]q[/yellow]           Quit
 
 [dim]Press Escape, h or q to close[/dim]"""
@@ -274,6 +290,369 @@ class ConfirmDialog(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+# ---------------------------------------------------------------------------
+# Screensaver
+# ---------------------------------------------------------------------------
+
+_SS_QUOTES: list[str] = [
+    # gaming classics
+    "All your ROMs are belong to us.",
+    "It's dangerous to download alone.  Take this.",
+    "The princess is in another folder.",
+    "Stay a while and listen — your queue awaits.",
+    "Do a barrel roll…  (downloads are unaffected)",
+    "It's super effective!  4 segments per file!",
+    "A wild 429 appeared!  Myrient used Retry-After!",
+    "One does not simply cancel 10 000 queued downloads.",
+    "You have died of dysentery.  (retry works though)",
+    # classic IT
+    "Have you tried turning it off and on again?",
+    "404: Sleep not found.",
+    "It works on my machine.  Ship the machine.",
+    "// TODO: add comment explaining this later  (never did)",
+    "sudo make me a sandwich",
+    # screensaver meta
+    "Loading… just kidding, the index is already in RAM.",
+    "Press [~] to exit.  Or don't.  I'm a screensaver, not a cop.",
+    "This screensaver uses 0.0 watts.  The rest is pure attitude.",
+    "Watching the bouncing box… waiting for the corner hit…",
+    # download wisdom
+    "Downloading the internet…  0.000001% complete.",
+    "Your queue is full of stars.",
+    "Git Gud at downloading.",
+    "Press F to pay respects to failed downloads.",
+    "Why does it work?  Nobody knows.",
+    "Retro gaming: where saving the world costs 8 bits.",
+    "These ROMs were made in a lab; no animals were harmed.",
+    "Remember: save early, save often.  (the queue is persistent anyway)",
+    # context-aware (used when stats are interesting)
+]
+
+# Context-aware quotes shown only when relevant stats are non-zero
+_SS_QUOTES_ACTIVE   = [
+    "Electrons hard at work.  Please do not disturb.",
+    "Bytes incoming.  Stand by.",
+    "Maximum effort.  (downloading)",
+    "Shh…  we're downloading.",
+]
+_SS_QUOTES_FAILED   = [
+    "Servers gonna serve.",
+    "It happens to the best of us.  Press [p].",
+    "Failed?  That's just a plot twist.  Retry!",
+    "Even the best heroes respawn.",
+]
+_SS_QUOTES_DONE_BIG = [
+    "Now THAT'S a collection!",
+    "Achievement unlocked: Hoarder Mode.",
+    "Your HDD has been violated.  In a good way.",
+    "Future archaeologists will thank you.",
+]
+
+_SS_COLORS: list[str] = [
+    "bright_cyan", "bright_green", "bright_yellow",
+    "bright_magenta", "bright_blue", "bright_red", "bright_white",
+]
+
+# Floating background chars — mix of stars and retro/tech symbols
+_SS_PARTICLES = "·∘°⋅˙01λΣΠ∞#@%"
+
+_BOX_W = 28   # total box width including borders
+_BOX_H = 11   # total box height including borders
+
+
+class _Buf:
+    """Minimal 2-D character canvas — each cell is (char, style)."""
+
+    __slots__ = ("w", "h", "_cells")
+
+    def __init__(self, w: int, h: int) -> None:
+        self.w = w
+        self.h = h
+        self._cells: list[list[tuple[str, str]]] = [
+            [(" ", "") for _ in range(w)] for _ in range(h)
+        ]
+
+    def put(self, x: int, y: int, ch: str, style: str = "") -> None:
+        if 0 <= x < self.w and 0 <= y < self.h:
+            self._cells[y][x] = (ch, style)
+
+    def put_str(self, x: int, y: int, s: str, style: str = "") -> None:
+        for i, ch in enumerate(s):
+            self.put(x + i, y, ch, style)
+
+    def to_text(self) -> Text:
+        t = Text(no_wrap=True, overflow="crop")
+        for ri, row in enumerate(self._cells):
+            prev_style: str | None = None
+            run: list[str] = []
+            for ch, style in row:
+                if style != prev_style:
+                    if run:
+                        t.append("".join(run), style=prev_style or "")
+                        run = []
+                    prev_style = style
+                run.append(ch)
+            if run:
+                t.append("".join(run), style=prev_style or "")
+            if ri < len(self._cells) - 1:
+                t.append("\n")
+        return t
+
+
+class _ScreensaverWidget(Widget):
+    """Animated canvas: bouncing stats box + drifting star field."""
+
+    DEFAULT_CSS = """
+    _ScreensaverWidget {
+        background: #000000;
+        width: 1fr;
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, state: StateManager) -> None:
+        super().__init__()
+        self._state = state
+        self._tick = 0
+        # Bouncing box
+        self._bx = 4.0
+        self._by = 2.0
+        self._bdx = 0.38
+        self._bdy = 0.20
+        self._color_iter = _icycle(_SS_COLORS)
+        self._color = next(self._color_iter)
+        self._corner_flash = 0
+        self._corner_count = 0
+        # Particles
+        self._stars: list[list] = []   # [x, y, ch, speed]
+        # Quote + typing animation
+        self._quote = random.choice(_SS_QUOTES)
+        self._quote_tick = 0
+        self._typed_len = 0     # chars revealed so far (typing effect)
+
+    def on_mount(self) -> None:
+        w = self.size.width or 80
+        h = self.size.height or 24
+        for _ in range(60):
+            self._stars.append([
+                random.uniform(0, w),
+                random.uniform(0, h),
+                random.choice(_SS_PARTICLES),
+                random.uniform(0.02, 0.12),
+            ])
+        self.set_interval(1 / 20, self._step)
+
+    def _pick_quote(self, stats: dict) -> str:
+        """Choose a contextually appropriate quote."""
+        active  = stats.get("downloading", 0)
+        failed  = stats.get("failed", 0)
+        done    = stats.get("completed", 0)
+        pool = list(_SS_QUOTES)
+        if active > 0:
+            pool += _SS_QUOTES_ACTIVE * 3        # higher weight when downloading
+        if failed > 0:
+            pool += _SS_QUOTES_FAILED * 2
+        if done >= 100:
+            pool += _SS_QUOTES_DONE_BIG * 2
+        return random.choice(pool)
+
+    def _step(self) -> None:
+        self._tick += 1
+        w, h = self.size.width, self.size.height
+        if w == 0:
+            return
+
+        # Drift particles
+        for s in self._stars:
+            s[1] -= s[3]
+            if s[1] < 0:
+                s[1] = float(h)
+                s[0] = random.uniform(0, w)
+                s[2] = random.choice(_SS_PARTICLES)
+
+        # Bounce box
+        max_bx = float(max(0, w - _BOX_W - 1))
+        max_by = float(max(0, h - _BOX_H - 3))
+        self._bx = min(max(self._bx + self._bdx, 0.0), max_bx)
+        self._by = min(max(self._by + self._bdy, 0.0), max_by)
+
+        hit_x = self._bx <= 0.0 or self._bx >= max_bx
+        hit_y = self._by <= 0.0 or self._by >= max_by
+        if hit_x:
+            self._bdx = -self._bdx
+        if hit_y:
+            self._bdy = -self._bdy
+        if hit_x or hit_y:
+            self._color = next(self._color_iter)
+        if hit_x and hit_y:
+            self._corner_count += 1
+            self._corner_flash = 50
+        if self._corner_flash > 0:
+            self._corner_flash -= 1
+
+        # Advance typing animation (2 chars per tick = ~40 chars/s)
+        self._typed_len = min(len(self._quote), self._typed_len + 2)
+
+        # Rotate quote every ~15 s, restart typing
+        if self._tick - self._quote_tick >= 300:
+            stats = self._state.get_stats()
+            self._quote = self._pick_quote(stats)
+            self._quote_tick = self._tick
+            self._typed_len = 0
+
+        self.refresh()
+
+    def _build_box(self, stats: dict, downloading: list) -> list[str]:
+        inner = _BOX_W - 2   # 26 printable chars
+        pad = lambda s: "│" + s[:inner].ljust(inner) + "│"  # noqa: E731
+
+        queued  = stats.get("queued", 0)
+        active  = stats.get("downloading", 0)
+        done    = stats.get("completed", 0)
+        failed  = stats.get("failed", 0)
+        on_disk = stats.get("already_downloaded", 0)
+        total   = stats.get("total", 0)
+
+        title = "  ↓  M Y R I E N T"
+        lines: list[str] = [
+            "╭" + "─" * inner + "╮",
+            pad(title),
+            "│" + "─" * inner + "│",
+        ]
+
+        # ── active section: show progress bar if anything is downloading ──
+        if active > 0 and downloading:
+            item = downloading[0]
+            prog = max(0.0, min(100.0, item.progress))
+            bar_w = inner - 10          # "  >> [" + "] 100%" = 10 chars
+            filled = int(prog / 100 * bar_w)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            lines.append(pad(f"  >> [{bar}] {prog:3.0f}%"))
+            # Filename (truncated)
+            name = Path(item.path).name
+            max_name = inner - 5
+            if len(name) > max_name:
+                name = name[:max_name - 3] + "..."
+            spd = item.speed
+            if spd >= 1_048_576:
+                spd_str = f"{spd/1_048_576:.1f}MB/s"
+            elif spd >= 1024:
+                spd_str = f"{spd/1024:.0f}KB/s"
+            elif spd > 0:
+                spd_str = f"{spd:.0f}B/s"
+            else:
+                spd_str = "..."
+            lines.append(pad(f"  {name}"))
+            lines.append(pad(f"  {active} active  {spd_str}"))
+        else:
+            lines.append(pad(f"  downloading  {active:>5}"))
+
+        lines += [
+            pad(f"  queued      {queued:>5}"),
+            pad(f"  done        {done:>5}"),
+            pad(f"  failed      {failed:>5}"),
+            pad(f"  on disk     {on_disk:>5}"),
+            pad(f"  total       {total:>5}"),
+            "╰" + "─" * inner + "╯",
+        ]
+        return lines
+
+    def render(self) -> Text:
+        w, h = self.size.width, self.size.height
+        if w < 10 or h < 6:
+            return Text()
+
+        buf = _Buf(w, h)
+
+        # ── particle field ──────────────────────────────────────────
+        for sx, sy, sch, _ in self._stars:
+            # digits/symbols get slightly brighter than dots
+            style = "dim #3a3a3a" if sch in "01λΣΠ∞#@%" else "dim #252525"
+            buf.put(int(sx), int(sy), sch, style)
+
+        # ── stats box ───────────────────────────────────────────────
+        stats       = self._state.get_stats()
+        downloading = self._state.get_downloading_items()
+        bx, by      = int(self._bx), int(self._by)
+        box_style   = f"bold {self._color}"
+        for i, line in enumerate(self._build_box(stats, downloading)):
+            avail = w - bx
+            if avail > 0:
+                buf.put_str(bx, by + i, line[:avail], box_style)
+
+        # ── corner flash ────────────────────────────────────────────
+        if self._corner_flash > 0:
+            msgs = [
+                " ★  CORNER!  ★ ",
+                " ★★  CORNER x2!  ★★ ",
+                " ★★★  HAT TRICK CORNER!  ★★★ ",
+            ]
+            msg = msgs[min(self._corner_count - 1, len(msgs) - 1)]
+            flash_style = (
+                "bold bright_yellow on black"
+                if self._corner_flash % 4 < 2
+                else "bold black on bright_yellow"
+            )
+            cx = bx + (_BOX_W - len(msg)) // 2
+            buf.put_str(max(0, cx), by + _BOX_H // 2, msg[:w], flash_style)
+
+        # ── pulse ring (appears when sin ≈ 0) ───────────────────────
+        pulse = int(abs(math.sin(self._tick / 20)) * 3)
+        if pulse == 0:
+            ring_style = f"dim {self._color}"
+            rx1, ry1 = bx - 1, by - 1
+            rx2, ry2 = bx + _BOX_W, by + _BOX_H
+            for rx in range(rx1, rx2 + 1):
+                buf.put(rx, ry1, "·", ring_style)
+                buf.put(rx, ry2, "·", ring_style)
+            for ry in range(ry1, ry2 + 1):
+                buf.put(rx1, ry, "·", ring_style)
+                buf.put(rx2, ry, "·", ring_style)
+
+        # ── quote with typing effect ─────────────────────────────────
+        if h > 4:
+            revealed = self._quote[:self._typed_len]
+            cursor = "_" if (self._tick % 10) < 5 else " "
+            # don't show cursor once fully typed
+            display = revealed if self._typed_len >= len(self._quote) else revealed + cursor
+            qx = max(0, (w - len(self._quote)) // 2)
+            buf.put_str(qx, h - 3, display[:w], "italic #5a5a5a")
+
+        # ── bottom hint ─────────────────────────────────────────────
+        hint = "any key to exit  ·  ~ to return"
+        buf.put_str(max(0, (w - len(hint)) // 2), h - 1, hint[:w], "dim #383838")
+
+        return buf.to_text()
+
+
+class ScreensaverScreen(ModalScreen[None]):
+    """Full-screen animated screensaver (press any key to dismiss)."""
+
+    DEFAULT_CSS = """
+    ScreensaverScreen {
+        background: #000000;
+        padding: 0;
+        margin: 0;
+        layers: below above;
+    }
+    ScreensaverScreen > _ScreensaverWidget {
+        width: 100%;
+        height: 100%;
+    }
+    """
+
+    def __init__(self, state: StateManager) -> None:
+        super().__init__()
+        self._state = state
+
+    def compose(self) -> ComposeResult:
+        yield _ScreensaverWidget(self._state)
+
+    def on_key(self, event: Key) -> None:
+        event.prevent_default()
+        self.dismiss()
 
 
 class ExportDialog(ModalScreen[tuple[str, str] | None]):
@@ -348,7 +727,7 @@ class DownloadPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Move to front  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]/[/] Search  [cyan]1-5[/] Filter",
+            "[bold]Keys:[/bold] [cyan]p[/] Retry  [cyan]u[/] Front  [cyan]F[/] Force  [cyan]x[/] Remove  [cyan]f[/] Retry failed  [cyan]k[/] Clear done  [cyan]X[/] Clear all  [cyan]+[/][cyan]-[/] Slots  [cyan]/[/] Search  [cyan]1-5[/] Filter",
             id="download-help",
         )
         with Horizontal(id="download-filter-row"):
@@ -358,6 +737,7 @@ class DownloadPanel(Static):
                 id="download-filter-buttons",
             )
         yield Static("", id="download-summary")
+        yield Static("", id="download-concurrency")
         yield DataTable(id="download-table")
 
     def on_mount(self) -> None:
@@ -391,13 +771,15 @@ class DownloadPanel(Static):
             failed_count = sum(1 for i in items if i.status == DownloadStatus.FAILED)
             total_count = len(items)
         
-        # Calculate sizes from visible items (approximation for display)
-        total_size = 0
-        downloaded_size = 0
-        for item in items:
-            if item.total_size > 0:
-                total_size += item.total_size
-                downloaded_size += item.downloaded_size
+        # Use pre-computed sizes from the full filtered list when available
+        # (passed via stats["all_total_size"]), so that Total/Remaining reflect
+        # ALL matching items, not just the current page.
+        if stats and "all_total_size" in stats:
+            total_size = stats["all_total_size"]
+            downloaded_size = stats["all_downloaded_size"]
+        else:
+            total_size = sum(i.total_size for i in items if i.total_size > 0)
+            downloaded_size = sum(i.downloaded_size for i in items)
         
         # Update summary
         remaining = total_size - downloaded_size
@@ -416,15 +798,31 @@ class DownloadPanel(Static):
             if remaining > 0:
                 summary_parts.append(f"Remaining: {format_size(remaining)}")
         
-        # Show filtered/total count
+        # Show page / filtered / total info
         filtered_count = stats.get("filtered", len(items)) if stats else len(items)
+        page = (stats.get("page", 0) if stats else 0) + 1
+        max_page = (stats.get("max_page", 0) if stats else 0) + 1
+        page_start = stats.get("page_start", 0) + 1 if stats else 1
+        page_end = stats.get("page_end", len(items)) if stats else len(items)
+
         if filtered_count < total_count:
-            if len(items) < filtered_count:
-                summary_parts.insert(0, f"[yellow]Showing {len(items)}/{filtered_count} (filtered from {total_count})[/]")
+            page_info = f"[yellow]Filtered {filtered_count}/{total_count}[/]"
+        else:
+            page_info = None
+
+        if filtered_count > len(items):
+            pag_info = (
+                f"[dim]{page_start}-{page_end}/{filtered_count}, "
+                f"str. {page}/{max_page}  "
+                f"[cyan]][/cyan] nast.  [cyan]\\[[/cyan] poprz.[/dim]"
+            )
+            if page_info:
+                summary_parts.insert(0, pag_info)
+                summary_parts.insert(0, page_info)
             else:
-                summary_parts.insert(0, f"[yellow]Filtered: {filtered_count}/{total_count}[/]")
-        elif len(items) < total_count:
-            summary_parts.insert(0, f"[yellow]Showing {len(items)}/{total_count}[/]")
+                summary_parts.insert(0, pag_info)
+        elif page_info:
+            summary_parts.insert(0, page_info)
         
         summary_widget.update(" | ".join(summary_parts) if summary_parts else "No downloads")
         
@@ -438,6 +836,7 @@ class DownloadPanel(Static):
                 DownloadStatus.COMPLETED: "[green]Done[/green]",
                 DownloadStatus.FAILED: "[red]Failed[/red]",
                 DownloadStatus.PAUSED: "[yellow]Paused[/yellow]",
+                DownloadStatus.ALREADY_DOWNLOADED: "[cyan]On disk[/cyan]",
             }.get(item.status, str(item.status))
 
             name = Path(item.path).name.replace("[", "\\[")
@@ -496,6 +895,15 @@ class DownloadPanel(Static):
             else:
                 # Add new row
                 table.add_row(*row_data, key=item.path)
+
+    def update_concurrency(self, concurrency: int, throttle_remaining: float = 0.0) -> None:
+        """Update the concurrency indicator line."""
+        widget = self.query_one("#download-concurrency", Static)
+        bar = "█" * concurrency + "░" * max(0, 16 - concurrency)
+        slots_text = f"[bold]Slots:[/bold] [cyan]{bar}[/cyan] [cyan bold]{concurrency}[/cyan bold]  [dim]([cyan]-[/cyan] / [cyan]+[/cyan] to change, max {CONCURRENCY_MAX})[/dim]"
+        if throttle_remaining > 0:
+            slots_text += f"  [yellow bold]⏸ Rate-limited {throttle_remaining:.0f}s[/yellow bold]"
+        widget.update(slots_text)
 
     def get_selected_item(self) -> DownloadItem | None:
         """Get currently selected download item."""
@@ -594,6 +1002,12 @@ class MyrientBrowser(App):
         height: auto;
         padding: 0 1;
         background: $surface-darken-1;
+    }
+
+    #download-concurrency {
+        height: auto;
+        padding: 0 1;
+        background: $surface-darken-2;
     }
 
     #download-table {
@@ -740,6 +1154,7 @@ class MyrientBrowser(App):
         # Downloads tab
         Binding("p", "retry_selected", "Retry", show=False),
         Binding("u", "promote_selected", "Move to front", show=False),
+        Binding("F", "force_redownload", "Force re-download", show=False),
         Binding("x", "remove_download", "Remove", show=False),
         Binding("f", "retry_all_failed", "Retry All", show=False),
         Binding("k", "clear_completed", "Clear Done", show=False),
@@ -749,6 +1164,9 @@ class MyrientBrowser(App):
         Binding("3", "filter_active", "Active", show=False),
         Binding("4", "filter_done", "Done", show=False),
         Binding("5", "filter_failed", "Failed", show=False),
+        Binding("+", "concurrency_up", "More slots", show=False),
+        Binding("-", "concurrency_down", "Fewer slots", show=False),
+        # ~ / ` handled in on_key (Textual key names: tilde / grave_accent)
     ]
 
     download_search_query = reactive("")
@@ -784,6 +1202,8 @@ class MyrientBrowser(App):
         self._search_debounce_timer = None
         self._all_nodes: list[IndexNode] = []  # Full untruncated node list
         self._list_page: int = 0  # Current page for large directories
+        self._download_page: int = 0  # Current page for Downloads tab
+        self._download_all_items: list = []  # Full unfiltered+filtered list for pagination
 
         if index is not None:
             self.index_loading = False
@@ -1067,13 +1487,17 @@ class MyrientBrowser(App):
 
         stats_panel.update(stats)
 
-    def update_download_panel(self) -> None:
-        """Update download panel with search and status filtering."""
+    def update_download_panel(self, reset_page: bool = False) -> None:
+        """Update download panel with search, status filtering and pagination."""
         try:
             panel = self.query_one("#download-panel-content", DownloadPanel)
+        except Exception:
+            return
+
+        try:
             all_items = self.state.get_all_items()
             stats = self.state.get_stats()
-            
+
             # Apply status filter
             status_filter = self.download_status_filter
             if status_filter == "queued":
@@ -1086,30 +1510,65 @@ class MyrientBrowser(App):
                 items = [i for i in all_items if i.status == DownloadStatus.FAILED]
             else:
                 items = all_items
-            
-            # Apply search filter (fuzzy search on path/filename)
+
+            # Apply search filter
             search_query = self.download_search_query.strip().lower()
             if search_query:
-                filtered = []
-                for item in items:
-                    name = Path(item.path).name.lower()
-                    path = item.path.lower()
-                    if search_query in name or search_query in path:
-                        filtered.append(item)
-                items = filtered
-            
-            # Sort: downloading first, then queued, then by added time
+                items = [
+                    i for i in items
+                    if search_query in Path(i.path).name.lower() or search_query in i.path.lower()
+                ]
+
+            # Sort: downloading first, then queued by priority, then by added time
             items.sort(key=lambda x: (
                 x.status != DownloadStatus.DOWNLOADING,
                 x.status != DownloadStatus.QUEUED,
+                x.priority if x.status == DownloadStatus.QUEUED else 0,
                 -x.added_at,
             ))
-            
-            # Pass filtered count for display, but use full stats for totals
+
+            # Save full filtered list for pagination
+            self._download_all_items = items
+            total = len(items)
+
+            if reset_page:
+                self._download_page = 0
+
+            # Pagination
+            page_size = self.LIST_PAGE_SIZE
+            page = self._download_page
+            max_page = max(0, (total - 1) // page_size) if total > 0 else 0
+            if page > max_page:
+                self._download_page = max_page
+                page = max_page
+            start = page * page_size
+            end = min(start + page_size, total)
+            page_items = items[start:end]
+
+            # Sizes must be computed from the FULL filtered list, not just the
+            # current page, so that Total/Remaining reflect all queued work.
+            all_total_size = sum(i.total_size for i in items if i.total_size > 0)
+            all_downloaded_size = sum(i.downloaded_size for i in items)
+
+            # Build stats for summary
             filtered_stats = stats.copy()
-            filtered_stats["filtered"] = len(items)
-            
-            panel.update_downloads(items[:100], filtered_stats)
+            filtered_stats["filtered"] = total
+            filtered_stats["page_start"] = start
+            filtered_stats["page_end"] = end
+            filtered_stats["page"] = page
+            filtered_stats["max_page"] = max_page
+            filtered_stats["all_total_size"] = all_total_size
+            filtered_stats["all_downloaded_size"] = all_downloaded_size
+
+            panel.update_downloads(page_items, filtered_stats)
+
+            # Update concurrency bar
+            if self.downloader:
+                panel.update_concurrency(
+                    self.downloader.concurrency,
+                    self.downloader.throttle_remaining,
+                )
+
             self.update_stats()
         except Exception:
             pass
@@ -1139,7 +1598,7 @@ class MyrientBrowser(App):
     def on_download_search_changed(self, event: Input.Changed) -> None:
         """Handle download search input change."""
         self.download_search_query = event.value
-        self.update_download_panel()
+        self.update_download_panel(reset_page=True)
 
     @on(ListView.Selected, "#file-list")
     def on_item_selected(self, event: ListView.Selected) -> None:
@@ -1314,33 +1773,51 @@ class MyrientBrowser(App):
             pass
 
     def on_key(self, event: Key) -> None:
-        """Handle key events directly for pagination (priority over focused widgets)."""
-        if not self._is_browser_tab():
-            return
+        """Handle special keys that Textual won't match by character alone."""
         if event.key == "right_square_bracket":
             event.prevent_default()
             self.action_next_page()
         elif event.key == "left_square_bracket":
             event.prevent_default()
             self.action_prev_page()
+        elif event.key in ("tilde", "grave_accent"):
+            # ~ (Shift+`) or ` both launch the screensaver
+            event.prevent_default()
+            self.action_screensaver()
 
     def action_next_page(self) -> None:
-        """Go to next page of large directory listing."""
-        total = len(self._all_nodes)
-        pages = (total + self.LIST_PAGE_SIZE - 1) // self.LIST_PAGE_SIZE
-        if self._list_page < pages - 1:
-            self._list_page += 1
-            self.refresh_list(preserve_cursor=False, reset_page=False)
+        """Go to next page (Browser or Downloads tab)."""
+        if self._is_downloads_tab():
+            total = len(self._download_all_items)
+            max_page = max(0, (total - 1) // self.LIST_PAGE_SIZE) if total else 0
+            if self._download_page < max_page:
+                self._download_page += 1
+                self.update_download_panel()
+            else:
+                self.notify("Last page", severity="information")
         else:
-            self.notify("Ostatnia strona", severity="information")
+            total = len(self._all_nodes)
+            pages = (total + self.LIST_PAGE_SIZE - 1) // self.LIST_PAGE_SIZE
+            if self._list_page < pages - 1:
+                self._list_page += 1
+                self.refresh_list(preserve_cursor=False, reset_page=False)
+            else:
+                self.notify("Last page", severity="information")
 
     def action_prev_page(self) -> None:
-        """Go to previous page of large directory listing."""
-        if self._list_page > 0:
-            self._list_page -= 1
-            self.refresh_list(preserve_cursor=False, reset_page=False)
+        """Go to previous page (Browser or Downloads tab)."""
+        if self._is_downloads_tab():
+            if self._download_page > 0:
+                self._download_page -= 1
+                self.update_download_panel()
+            else:
+                self.notify("First page", severity="information")
         else:
-            self.notify("Pierwsza strona", severity="information")
+            if self._list_page > 0:
+                self._list_page -= 1
+                self.refresh_list(preserve_cursor=False, reset_page=False)
+            else:
+                self.notify("First page", severity="information")
 
     def action_add_to_queue(self) -> None:
         """Add selected or highlighted item to download queue."""
@@ -1405,8 +1882,19 @@ class MyrientBrowser(App):
                     info = self.index._path_info.get(path)
                     if info and not info[0]:  # file, not directory
                         sizes[path] = info[1]
-            added = await self.downloader.add_to_queue(paths, sizes=sizes)
-            self.notify(f"Added {added} files to queue")
+            added_new, already_present = await self.downloader.add_to_queue(paths, sizes=sizes)
+            if already_present and added_new:
+                self.notify(
+                    f"Added {added_new} to queue, {already_present} already downloaded (press [f] to force re-download)",
+                    severity="warning",
+                )
+            elif already_present:
+                self.notify(
+                    f"{already_present} file(s) already downloaded — skipped. Press [f] to force re-download.",
+                    severity="warning",
+                )
+            else:
+                self.notify(f"Added {added_new} files to queue")
             self.update_stats()
 
     def action_export(self) -> None:
@@ -1536,7 +2024,7 @@ class MyrientBrowser(App):
         if not self._is_downloads_tab():
             return
         self.download_status_filter = filter_name
-        self.update_download_panel()
+        self.update_download_panel(reset_page=True)
         self._update_filter_display()
 
     def _update_filter_display(self) -> None:
@@ -1650,6 +2138,42 @@ class MyrientBrowser(App):
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
+    async def action_force_redownload(self) -> None:
+        """Force re-download of selected item regardless of current status (F)."""
+        if not self._is_downloads_tab():
+            return
+        try:
+            panel = self.query_one("#download-panel-content", DownloadPanel)
+            item = panel.get_selected_item()
+            if not item:
+                self.notify("No download selected", severity="warning")
+                return
+            if not self.downloader:
+                return
+            ok = await self.downloader.force_redownload(item.path)
+            if ok:
+                self.notify(f"↑ Force re-download queued: {Path(item.path).name}", severity="warning")
+            else:
+                self.notify("Item not found in queue", severity="error")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    def action_concurrency_up(self) -> None:
+        """Increase concurrent download slots by 1 (+)."""
+        if not self._is_downloads_tab() or not self.downloader:
+            return
+        new = self.downloader.set_concurrency(self.downloader.concurrency + 1)
+        self.notify(f"Concurrency → {new}", severity="information")
+        self.update_download_panel()
+
+    def action_concurrency_down(self) -> None:
+        """Decrease concurrent download slots by 1 (-)."""
+        if not self._is_downloads_tab() or not self.downloader:
+            return
+        new = self.downloader.set_concurrency(self.downloader.concurrency - 1)
+        self.notify(f"Concurrency → {new}", severity="information")
+        self.update_download_panel()
+
     def action_promote_selected(self) -> None:
         """Move selected download to the front of the queue."""
         if not self._is_downloads_tab():
@@ -1668,6 +2192,10 @@ class MyrientBrowser(App):
                 self.notify(f"↑ Moved to front: {Path(item.path).name}")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
+
+    def action_screensaver(self) -> None:
+        """Launch the screensaver (~)."""
+        self.push_screen(ScreensaverScreen(self.state))
 
     async def action_quit(self) -> None:
         """Quit application."""

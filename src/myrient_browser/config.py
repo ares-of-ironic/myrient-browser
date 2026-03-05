@@ -27,9 +27,11 @@ class DownloadConfig:
     retries: int = 3
     retry_delay: float = 2.0
     max_retry_delay: float = 60.0
-    chunk_size: int = 8388608  # 8MB - larger chunks for faster downloads
+    chunk_size: int = 8388608  # 8 MB — larger chunks reduce syscall overhead
     timeout: int = 60
     rate_limit: float = 0
+    segments_per_file: int = 4     # parallel HTTP Range segments per file (1 = off)
+    min_segmented_mb: float = 8.0  # min file size (MB) to trigger segmented download
 
 
 @dataclass
@@ -39,6 +41,7 @@ class IndexConfig:
     index_file: str = "directory/all_paths.txt"
     watch_enabled: bool = False
     watch_interval: int = 60
+    search_limit: int = 500  # max results returned by fuzzy/rg search in Browser
 
 
 @dataclass

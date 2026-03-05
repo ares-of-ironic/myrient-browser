@@ -425,7 +425,7 @@ class FileIndex:
     def search(
         self,
         query: str,
-        limit: int = 100,
+        limit: int | None = None,
         dirs_only: bool = False,
         files_only: bool = False,
     ) -> list[IndexNode]:
@@ -437,6 +437,9 @@ class FileIndex:
         """
         if not query:
             return []
+
+        if limit is None:
+            limit = self.config.index.search_limit
 
         query = query.strip()
         terms = [t.strip() for t in query.split("|") if t.strip()]

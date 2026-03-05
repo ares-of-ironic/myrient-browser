@@ -34,6 +34,16 @@ timeout = 30
 # Enable rate limiting (requests per second, 0 = disabled)
 rate_limit = 0
 
+# Number of parallel HTTP Range segments per file.
+# Values > 1 split each file into N segments downloaded simultaneously,
+# which can dramatically increase speed on high-latency or throttled servers.
+# Set to 1 to disable segmented downloading.
+segments_per_file = 4
+
+# Minimum file size (in MB) required to use segmented downloading.
+# Files smaller than this are always downloaded as a single stream.
+min_segmented_mb = 8.0
+
 [index]
 # Path to the index file (relative to project root)
 # Supports two formats:
@@ -54,6 +64,11 @@ watch_enabled = false
 
 # Polling interval for index file changes (seconds)
 watch_interval = 60
+
+# Maximum number of results returned by search in the Browser tab.
+# Applies to both rg-backed search and the Python fuzzy fallback.
+# Increase for larger result sets at the cost of slightly slower rendering.
+search_limit = 500
 
 [export]
 # Default export directory
