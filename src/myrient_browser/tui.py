@@ -1919,7 +1919,7 @@ class MyrientBrowser(App):
             elif status_filter == "active":
                 items = [i for i in all_items if i.status == DownloadStatus.DOWNLOADING]
             elif status_filter == "done":
-                items = [i for i in all_items if i.status == DownloadStatus.COMPLETED]
+                items = [i for i in all_items if i.status in (DownloadStatus.COMPLETED, DownloadStatus.ALREADY_DOWNLOADED)]
             elif status_filter == "failed":
                 items = [i for i in all_items if i.status == DownloadStatus.FAILED]
             else:
@@ -2597,27 +2597,30 @@ class MyrientBrowser(App):
                 else:
                     list_view = self.query_one("#file-list", ListView)
                     if list_view.highlighted_child and isinstance(list_view.highlighted_child, PathItem):
-                        node = list_view.highlighted_child.node
-                        if not node.is_dir and self.index:
-                            paths = self.index.expand_selection([node.path])
-                if not paths:
+                        paths = [list_view.highlighted_child.node.path]
+                if not paths or not self.index:
                     self.notify("Nothing selected", severity="warning")
                     return
+                # Expand directories to files
+                expanded = self.index.expand_selection(paths)
+                if not expanded:
+                    self.notify("No files to download", severity="warning")
+                    return
                 count = 0
-                for path in paths:
+                sizes: dict[str, int] = {}
+                if self.index.has_sizes:
+                    for path in expanded:
+                        info = self.index._path_info.get(path)
+                        if info and not info[0]:
+                            sizes[path] = info[1]
+                for path in expanded:
                     existing = self.downloader.state.get_item(path)
                     if existing:
                         ok = await self.downloader.force_redownload(path)
                         if ok:
                             count += 1
                     else:
-                        # Not in queue at all — add it normally
-                        sizes: dict[str, int] = {}
-                        if self.index and self.index.has_sizes:
-                            info = self.index._path_info.get(path)
-                            if info and not info[0]:
-                                sizes[path] = info[1]
-                        await self.downloader.add_to_queue([path], sizes=sizes)
+                        await self.downloader.add_to_queue([path], sizes=sizes, force=True)
                         count += 1
                 if count:
                     self.notify(f"↑ Force re-download: {count} file(s) queued", severity="warning")

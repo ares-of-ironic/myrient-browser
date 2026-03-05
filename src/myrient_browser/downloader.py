@@ -275,12 +275,16 @@ class DownloadManager:
         paths: list[str],
         expanded_from: str = "",
         sizes: dict[str, int] | None = None,
+        force: bool = False,
     ) -> tuple[int, int]:
         """Add paths to download queue.
 
         Checks whether each file already exists locally; if so it is added with
         status ALREADY_DOWNLOADED and skipped by the downloader unless explicitly
         forced via force_redownload().
+
+        Args:
+            force: If True, delete existing files and queue for fresh download.
 
         Returns:
             (added_new, already_present) – counts of truly new items and items
@@ -321,20 +325,36 @@ class DownloadManager:
 
             # Check whether the file is already on disk
             if lp.exists() and lp.stat().st_size > 0:
-                local_size = lp.stat().st_size
-                item = DownloadItem(
-                    path=path,
-                    url=url,
-                    local_path=local_path,
-                    expanded_from=expanded_from,
-                    total_size=total_size or local_size,
-                    downloaded_size=local_size,
-                    progress=100.0,
-                    status=DownloadStatus.ALREADY_DOWNLOADED,
-                    local_size=local_size,
-                )
-                self.state.add_item(item)
-                already_present += 1
+                if force:
+                    # Force mode: delete existing file and queue for fresh download
+                    try:
+                        lp.unlink()
+                    except OSError:
+                        pass
+                    item = DownloadItem(
+                        path=path,
+                        url=url,
+                        local_path=local_path,
+                        expanded_from=expanded_from,
+                        total_size=total_size,
+                    )
+                    self.state.add_item(item)
+                    added_new += 1
+                else:
+                    local_size = lp.stat().st_size
+                    item = DownloadItem(
+                        path=path,
+                        url=url,
+                        local_path=local_path,
+                        expanded_from=expanded_from,
+                        total_size=total_size or local_size,
+                        downloaded_size=local_size,
+                        progress=100.0,
+                        status=DownloadStatus.ALREADY_DOWNLOADED,
+                        local_size=local_size,
+                    )
+                    self.state.add_item(item)
+                    already_present += 1
             else:
                 item = DownloadItem(
                     path=path,
