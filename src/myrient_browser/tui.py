@@ -795,7 +795,7 @@ class DownloadPanel(Static):
         with Horizontal(id="download-filter-row"):
             yield Input(placeholder="Search downloads... (/)", id="download-search")
             yield Static(
-                "[1]All [2]Queued [3]Active [4]Done [5]Failed",
+                "[1]All [2]Queued/Paused [3]Active [4]Done [5]Failed",
                 id="download-filter-buttons",
             )
         yield Static("", id="download-summary")
@@ -821,17 +821,19 @@ class DownloadPanel(Static):
         
         # Use provided stats for accurate counts, or calculate from visible items as fallback
         if stats:
-            queued_count = stats.get("queued", 0)
+            queued_count  = stats.get("queued", 0)
+            paused_count  = stats.get("paused", 0)
             downloading_count = stats.get("downloading", 0)
             completed_count = stats.get("completed", 0)
-            failed_count = stats.get("failed", 0)
-            total_count = stats.get("total", 0)
+            failed_count  = stats.get("failed", 0)
+            total_count   = stats.get("total", 0)
         else:
-            queued_count = sum(1 for i in items if i.status == DownloadStatus.QUEUED)
+            queued_count  = sum(1 for i in items if i.status == DownloadStatus.QUEUED)
+            paused_count  = sum(1 for i in items if i.status == DownloadStatus.PAUSED)
             downloading_count = sum(1 for i in items if i.status == DownloadStatus.DOWNLOADING)
             completed_count = sum(1 for i in items if i.status == DownloadStatus.COMPLETED)
-            failed_count = sum(1 for i in items if i.status == DownloadStatus.FAILED)
-            total_count = len(items)
+            failed_count  = sum(1 for i in items if i.status == DownloadStatus.FAILED)
+            total_count   = len(items)
         
         # Use pre-computed sizes from the full filtered list when available
         # (passed via stats["all_total_size"]), so that Total/Remaining reflect
@@ -848,6 +850,8 @@ class DownloadPanel(Static):
         summary_parts = []
         if queued_count > 0:
             summary_parts.append(f"[dim]{queued_count} queued[/]")
+        if paused_count > 0:
+            summary_parts.append(f"[yellow]{paused_count} paused[/]")
         if downloading_count > 0:
             summary_parts.append(f"[blue]{downloading_count} downloading[/]")
         if completed_count > 0:
@@ -1882,12 +1886,14 @@ class MyrientBrowser(App):
 
         du_line = f"\n[bold]Disk used:[/bold] {self._du_result}" if self._du_result else ""
 
+        paused_q = queue_stats.get("paused", 0)
+        paused_str = f", [yellow]{paused_q} paused[/yellow]" if paused_q > 0 else ""
         stats = (
             f"[bold]Index:[/bold] {index_info}\n"
             f"[bold]Selected:[/bold] {selected_count}{selected_size_str}"
             f"{current_folder_info}\n"
-            f"[bold]Queue:[/bold] {queue_stats['queued']} queued, "
-            f"{queue_stats['downloading']} active\n"
+            f"[bold]Queue:[/bold] {queue_stats['queued']} queued"
+            f"{paused_str}, {queue_stats['downloading']} active\n"
             f"[bold]Done:[/bold] {queue_stats['completed']} completed, "
             f"{queue_stats['failed']} failed"
             f"{du_line}"
@@ -1909,7 +1915,7 @@ class MyrientBrowser(App):
             # Apply status filter
             status_filter = self.download_status_filter
             if status_filter == "queued":
-                items = [i for i in all_items if i.status == DownloadStatus.QUEUED]
+                items = [i for i in all_items if i.status in (DownloadStatus.QUEUED, DownloadStatus.PAUSED)]
             elif status_filter == "active":
                 items = [i for i in all_items if i.status == DownloadStatus.DOWNLOADING]
             elif status_filter == "done":
@@ -2447,7 +2453,7 @@ class MyrientBrowser(App):
             f = self.download_status_filter
             parts = [
                 f"[bold cyan][1]All[/]" if f == "all" else "[1]All",
-                f"[bold cyan][2]Queued[/]" if f == "queued" else "[2]Queued",
+                f"[bold cyan][2]Queued/Paused[/]" if f == "queued" else "[2]Queued/Paused",
                 f"[bold cyan][3]Active[/]" if f == "active" else "[3]Active",
                 f"[bold cyan][4]Done[/]" if f == "done" else "[4]Done",
                 f"[bold cyan][5]Failed[/]" if f == "failed" else "[5]Failed",
