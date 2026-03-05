@@ -72,6 +72,25 @@ def format_speed(speed: float) -> str:
     return f"{speed:.0f} B/s"
 
 
+def format_eta(seconds: float) -> str:
+    """Format ETA in human-readable form (e.g., 2h 15m, 45m 30s, 30s)."""
+    if seconds <= 0:
+        return "-"
+    if seconds >= 86400:  # > 1 day
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        return f"{days}d {hours}h"
+    if seconds >= 3600:  # > 1 hour
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+    if seconds >= 60:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    return f"{int(seconds)}s"
+
+
 class PathItem(ListItem):
     """A list item representing a path in the index."""
 
@@ -899,10 +918,14 @@ class DownloadPanel(Static):
             if remaining > 0:
                 summary_parts.append(f"Remaining: {size_formatter(remaining)}")
         
-        # Show total speed if configured and there are active downloads
+        # Show total speed and ETA if configured and there are active downloads
         show_speed = _display_config.display.show_total_speed if _display_config else True
         if show_speed and total_speed > 0:
-            summary_parts.append(f"[cyan]Speed: {format_speed(total_speed)}[/cyan]")
+            speed_str = f"[cyan]Speed: {format_speed(total_speed)}[/cyan]"
+            if remaining > 0:
+                eta_seconds = remaining / total_speed
+                speed_str += f" [dim](ETA: {format_eta(eta_seconds)})[/dim]"
+            summary_parts.append(speed_str)
         
         # Show page / filtered / total info
         filtered_count = stats.get("filtered", len(items)) if stats else len(items)
