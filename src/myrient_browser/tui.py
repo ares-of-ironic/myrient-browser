@@ -2300,12 +2300,12 @@ class MyrientBrowser(App):
             added_new, already_present = await self.downloader.add_to_queue(paths, sizes=sizes)
             if already_present and added_new:
                 self.notify(
-                    f"Added {added_new} to queue, {already_present} already downloaded (press [f] to force re-download)",
+                    f"Added {added_new} to queue, {already_present} already on disk (press [F] to force re-download)",
                     severity="warning",
                 )
             elif already_present:
                 self.notify(
-                    f"{already_present} file(s) already downloaded — skipped. Press [f] to force re-download.",
+                    f"{already_present} file(s) already on disk — skipped. Press [F] to force re-download.",
                     severity="warning",
                 )
             else:
@@ -2550,6 +2550,20 @@ class MyrientBrowser(App):
                     self.state.promote_item(item.path)
                     self.state.save(force=True)
                     self.notify(f"↑ Re-downloading (priority): {Path(item.path).name}")
+                elif item.status == DownloadStatus.ALREADY_DOWNLOADED:
+                    if local_path.exists():
+                        local_path.unlink()
+                    self.state.update_item(
+                        item.path,
+                        status=DownloadStatus.QUEUED,
+                        progress=0.0,
+                        downloaded_size=0,
+                        error="",
+                        retries=0,
+                    )
+                    self.state.promote_item(item.path)
+                    self.state.save(force=True)
+                    self.notify(f"↑ Re-downloading (priority): {Path(item.path).name}")
                 elif item.status == DownloadStatus.QUEUED:
                     self.notify("Already queued — use [u] to move to front", severity="warning")
             else:
@@ -2558,22 +2572,56 @@ class MyrientBrowser(App):
             self.notify(f"Error: {e}", severity="error")
 
     async def action_force_redownload(self) -> None:
-        """Force re-download of selected item regardless of current status (F)."""
-        if not self._is_downloads_tab():
+        """Force re-download of selected item regardless of current status (F).
+
+        Works in both Downloads tab (selected row) and Browser tab (highlighted file).
+        """
+        if not self.downloader:
             return
         try:
-            panel = self.query_one("#download-panel-content", DownloadPanel)
-            item = panel.get_selected_item()
-            if not item:
-                self.notify("No download selected", severity="warning")
-                return
-            if not self.downloader:
-                return
-            ok = await self.downloader.force_redownload(item.path)
-            if ok:
-                self.notify(f"↑ Force re-download queued: {Path(item.path).name}", severity="warning")
-            else:
-                self.notify("Item not found in queue", severity="error")
+            if self._is_downloads_tab():
+                panel = self.query_one("#download-panel-content", DownloadPanel)
+                item = panel.get_selected_item()
+                if not item:
+                    self.notify("No download selected", severity="warning")
+                    return
+                ok = await self.downloader.force_redownload(item.path)
+                if ok:
+                    self.notify(f"↑ Force re-download queued: {Path(item.path).name}", severity="warning")
+                else:
+                    self.notify("Item not found in queue", severity="error")
+            elif self._is_browser_tab():
+                paths: list[str] = []
+                if self.selected_paths:
+                    paths = list(self.selected_paths)
+                else:
+                    list_view = self.query_one("#file-list", ListView)
+                    if list_view.highlighted_child and isinstance(list_view.highlighted_child, PathItem):
+                        node = list_view.highlighted_child.node
+                        if not node.is_dir and self.index:
+                            paths = self.index.expand_selection([node.path])
+                if not paths:
+                    self.notify("Nothing selected", severity="warning")
+                    return
+                count = 0
+                for path in paths:
+                    existing = self.downloader.state.get_item(path)
+                    if existing:
+                        ok = await self.downloader.force_redownload(path)
+                        if ok:
+                            count += 1
+                    else:
+                        # Not in queue at all — add it normally
+                        sizes: dict[str, int] = {}
+                        if self.index and self.index.has_sizes:
+                            info = self.index._path_info.get(path)
+                            if info and not info[0]:
+                                sizes[path] = info[1]
+                        await self.downloader.add_to_queue([path], sizes=sizes)
+                        count += 1
+                if count:
+                    self.notify(f"↑ Force re-download: {count} file(s) queued", severity="warning")
+                    self.update_stats()
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 

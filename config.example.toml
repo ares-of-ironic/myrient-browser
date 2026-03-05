@@ -6,7 +6,9 @@
 base_url = "https://myrient.erista.me/files"
 
 # User-Agent header for HTTP requests
-user_agent = "MyrientBrowser/1.0"
+# The server throttles non-wget clients to ~10 KB/s.
+# Wget/1.25.0 gets full speed (10-20 MB/s).
+user_agent = "Wget/1.25.0"
 
 [download]
 # Directory where downloaded files will be saved (relative to project root)
@@ -25,9 +27,9 @@ retry_delay = 2.0
 max_retry_delay = 60.0
 
 # Chunk size for streaming downloads (bytes).
-# Smaller = smoother progress bar; larger = fewer write syscalls.
-# 512 KB is a good default; increase to 2-4 MB on very fast connections.
-chunk_size = 524288  # 512 KB
+# Larger = fewer event-loop ticks and better throughput on fast connections.
+# 1 MB is a good default; decrease to 256 KB for smoother progress on slow links.
+chunk_size = 1048576  # 1 MB
 
 # Connection timeout in seconds
 timeout = 30
@@ -36,13 +38,13 @@ timeout = 30
 rate_limit = 0
 
 # Number of parallel HTTP Range segments per file.
-# Values > 1 split each file into N segments downloaded simultaneously,
-# which can dramatically increase speed on high-latency or throttled servers.
-# Set to 1 to disable segmented downloading.
-segments_per_file = 4
+# 1 = wget-like single stream (recommended, matches wget/curl performance).
+# Values > 1 split each file into N parallel Range requests — useful only
+# on servers that throttle per-connection bandwidth.
+segments_per_file = 1
 
 # Minimum file size (in MB) required to use segmented downloading.
-# Files smaller than this are always downloaded as a single stream.
+# Only relevant when segments_per_file > 1.
 min_segmented_mb = 8.0
 
 [index]

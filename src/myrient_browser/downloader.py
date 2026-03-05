@@ -289,7 +289,29 @@ class DownloadManager:
         added_new = 0
         already_present = 0
         for path in paths:
-            if self.state.get_item(path) is not None:
+            existing = self.state.get_item(path)
+            if existing is not None:
+                # If marked as ALREADY_DOWNLOADED but the file is gone, re-queue it
+                if existing.status == DownloadStatus.ALREADY_DOWNLOADED:
+                    lp = self.config.get_local_path(path)
+                    if not lp.exists():
+                        part = lp.with_suffix(lp.suffix + ".part")
+                        part.unlink(missing_ok=True)
+                        self.state.update_item(
+                            path,
+                            status=DownloadStatus.QUEUED,
+                            progress=0.0,
+                            downloaded_size=0,
+                            error="",
+                            retries=0,
+                        )
+                        added_new += 1
+                        continue
+                    # File still on disk — count as already_present
+                    already_present += 1
+                else:
+                    # QUEUED / DOWNLOADING / FAILED / PAUSED / COMPLETED — skip
+                    already_present += 1
                 continue
 
             url = self.config.build_url(path)
@@ -555,43 +577,47 @@ class DownloadManager:
         part_path: Path,
         resume_pos: int,
     ) -> None:
-        """Route to segmented or single-stream download."""
-        n_segs = self.config.download.segments_per_file
-        min_bytes = int(self.config.download.min_segmented_mb * 1024 * 1024)
+        """Route to segmented or single-stream (wget-like) download.
+
+        With segments_per_file=1 (default) this behaves exactly like wget:
+        a single GET request that follows redirects automatically and streams
+        directly to the .part file. No HEAD probe, no extra round-trips.
+
+        Segmented mode (segments_per_file > 1) requires a HEAD probe to learn
+        the total size for Range splitting, then issues N parallel requests.
+        """
         encoded_path = quote(item.path, safe="/")
         url = self.config.build_url(encoded_path)
 
-        # Detect leftover segment files from a previous segmented attempt
+        n_segs = self.config.download.segments_per_file
+        min_bytes = int(self.config.download.min_segmented_mb * 1024 * 1024)
+
+        # Check for leftover segment files from a previous segmented attempt
         seg0 = _seg_path(part_path, 0)
         resuming_segs = seg0.exists()
 
         if n_segs > 1 or resuming_segs:
+            # Segmented mode: need a HEAD probe to get total size for range math
             total_size, accepts_ranges, final_url = await self._probe_server(url)
+            cdn_url = final_url  # hit CDN directly for all segment requests
 
-            if accepts_ranges and total_size > 0:
-                if total_size >= min_bytes or resuming_segs:
-                    # Determine effective segment count
-                    if resuming_segs:
-                        # Honour the original split so ranges match
-                        effective = 0
-                        while _seg_path(part_path, effective).exists():
-                            effective += 1
-                        if effective == 0:
-                            effective = n_segs
-                    else:
-                        effective = min(n_segs, max(1, math.ceil(total_size / min_bytes)))
+            if accepts_ranges and total_size > 0 and (total_size >= min_bytes or resuming_segs):
+                if resuming_segs:
+                    effective = 0
+                    while _seg_path(part_path, effective).exists():
+                        effective += 1
+                    if effective == 0:
+                        effective = n_segs
+                else:
+                    effective = min(n_segs, max(1, math.ceil(total_size / min_bytes)))
 
-                    if effective > 1:
-                        # Use final_url so segments hit the CDN directly
-                        await self._do_segmented_download(
-                            item, part_path, final_url, total_size, effective
-                        )
-                        return
-        else:
-            # Single-stream but probe anyway to get the CDN URL
-            _, _, final_url = await self._probe_server(url)
-            url = final_url
+                if effective > 1:
+                    await self._do_segmented_download(
+                        item, part_path, cdn_url, total_size, effective
+                    )
+                    return
 
+        # wget-like single-stream: one GET, follow_redirects handles the CDN hop
         await self._do_single_stream(item, part_path, resume_pos, url)
 
     async def _probe_server(self, url: str) -> tuple[int, bool, str]:

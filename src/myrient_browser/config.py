@@ -15,7 +15,7 @@ class ServerConfig:
     """Server configuration."""
 
     base_url: str = "https://myrient.erista.me/files"
-    user_agent: str = "MyrientBrowser/1.0"
+    user_agent: str = "Wget/1.25.0"
 
 
 @dataclass
@@ -27,10 +27,10 @@ class DownloadConfig:
     retries: int = 3
     retry_delay: float = 2.0
     max_retry_delay: float = 60.0
-    chunk_size: int = 524288   # 512 KB — good balance of syscall overhead vs progress granularity
+    chunk_size: int = 1048576  # 1 MB chunks — fewer event-loop ticks for large files
     timeout: int = 60
     rate_limit: float = 0
-    segments_per_file: int = 4     # parallel HTTP Range segments per file (1 = off)
+    segments_per_file: int = 1     # 1 = wget-like single stream (set >1 for parallel Range segments)
     min_segmented_mb: float = 8.0  # min file size (MB) to trigger segmented download
 
 

@@ -100,6 +100,7 @@ class StateManager:
             "completed": 0,
             "failed": 0,
             "paused": 0,
+            "already_downloaded": 0,
         }
 
     def _rebuild_stats(self) -> None:
@@ -293,7 +294,7 @@ class StateManager:
     def get_stats(self) -> dict[str, int]:
         """Get queue statistics (O(1) - uses incremental cache)."""
         with self._lock:
-            return dict(self._stats)
+            return {k: max(0, v) for k, v in self._stats.items()}
 
     @property
     def is_empty(self) -> bool:
