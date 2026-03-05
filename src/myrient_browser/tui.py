@@ -53,6 +53,25 @@ def format_size(size: int) -> str:
     return _format_size_base(size, use_decimal=use_decimal)
 
 
+def format_size_mb(size: int) -> str:
+    """Format size always in MB (for Downloads Total/Remaining)."""
+    use_decimal = _display_config.display.use_decimal_units if _display_config else True
+    divisor = 1_000_000 if use_decimal else 1_048_576
+    mb = size / divisor
+    return f"{mb:,.1f} MB"
+
+
+def format_speed(speed: float) -> str:
+    """Format download speed in human-readable form."""
+    if speed <= 0:
+        return "-"
+    if speed >= 1_000_000:
+        return f"{speed / 1_000_000:.1f} MB/s"
+    if speed >= 1_000:
+        return f"{speed / 1_000:.1f} KB/s"
+    return f"{speed:.0f} B/s"
+
+
 class PathItem(ListItem):
     """A list item representing a path in the index."""
 
@@ -868,10 +887,22 @@ class DownloadPanel(Static):
         if failed_count > 0:
             summary_parts.append(f"[red]{failed_count} failed[/]")
         
+        # Calculate total speed from all downloading items
+        total_speed = sum(i.speed for i in items if i.status == DownloadStatus.DOWNLOADING and i.speed > 0)
+        
+        # Format sizes - use MB if configured
+        force_mb = _display_config.display.force_mb_in_downloads if _display_config else False
+        size_formatter = format_size_mb if force_mb else format_size
+        
         if total_size > 0:
-            summary_parts.append(f"Total: {format_size(total_size)}")
+            summary_parts.append(f"Total: {size_formatter(total_size)}")
             if remaining > 0:
-                summary_parts.append(f"Remaining: {format_size(remaining)}")
+                summary_parts.append(f"Remaining: {size_formatter(remaining)}")
+        
+        # Show total speed if configured and there are active downloads
+        show_speed = _display_config.display.show_total_speed if _display_config else True
+        if show_speed and total_speed > 0:
+            summary_parts.append(f"[cyan]Speed: {format_speed(total_speed)}[/cyan]")
         
         # Show page / filtered / total info
         filtered_count = stats.get("filtered", len(items)) if stats else len(items)

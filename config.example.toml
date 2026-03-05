@@ -107,3 +107,10 @@ use_decimal_units = true
 # false (default) = raw block count converted to your unit setting.
 # true  = let `du` format the number (e.g. "4.2G") — ignores use_decimal_units.
 du_human_readable = false
+
+# Force MB display for Total/Remaining in Downloads tab (never show GB)
+# Useful when you prefer seeing exact megabyte counts
+force_mb_in_downloads = false
+
+# Show combined download speed in Downloads summary line
+show_total_speed = true

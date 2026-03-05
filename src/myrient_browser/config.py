@@ -77,6 +77,10 @@ class DisplayConfig:
     use_decimal_units: bool = True
     # Pass -h to du (human-readable sizes). False = raw block count (faster, exact).
     du_human_readable: bool = False
+    # Force MB display for Total/Remaining in Downloads (never show GB)
+    force_mb_in_downloads: bool = False
+    # Show combined download speed in Downloads summary
+    show_total_speed: bool = True
 
 
 @dataclass
@@ -263,6 +267,8 @@ class Config:
             "[display]",
             f"use_decimal_units = {_bool(self.display.use_decimal_units)}",
             f"du_human_readable = {_bool(self.display.du_human_readable)}",
+            f"force_mb_in_downloads = {_bool(self.display.force_mb_in_downloads)}",
+            f"show_total_speed = {_bool(self.display.show_total_speed)}",
             "",
         ]
 
