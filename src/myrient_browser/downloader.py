@@ -243,7 +243,7 @@ class DownloadManager:
         because the downloader detects them and switches to segmented mode, which
         may trigger server rate-limiting (429) due to parallel requests.
         """
-        download_dir = Path(self.config.download.directory)
+        download_dir = self.config.get_download_dir()
         if not download_dir.exists():
             return
 
