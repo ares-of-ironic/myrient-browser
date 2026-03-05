@@ -1015,8 +1015,8 @@ class SettingsPanel(Widget):
 
     DEFAULT_CSS = ""  # CSS lives in MyrientBrowser.DEFAULT_CSS
 
-    def __init__(self, config: Config) -> None:
-        super().__init__()
+    def __init__(self, config: Config, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._config = config
         self._errors: dict[str, str] = {}
 
