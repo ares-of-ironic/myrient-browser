@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+import subprocess
+import sys
 from itertools import cycle as _icycle
 from pathlib import Path
 from typing import ClassVar
@@ -355,11 +357,14 @@ _SS_COLORS: list[str] = [
     "bright_magenta", "bright_blue", "bright_red", "bright_white",
 ]
 
-# Floating background chars — mix of stars and retro/tech symbols
-_SS_PARTICLES = "·∘°⋅˙01λΣΠ∞#@%"
+# Half-width katakana + digits + latin — all exactly 1 terminal column wide
+_MATRIX_CHARS = (
+    "ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ"
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ@#$%&"
+)
 
-_BOX_W = 28   # total box width including borders
-_BOX_H = 11   # total box height including borders
+_BOX_W = 30   # total box width including borders
+_BOX_H = 12   # total box height including borders
 
 
 class _Buf:
@@ -402,7 +407,7 @@ class _Buf:
 
 
 class _ScreensaverWidget(Widget):
-    """Animated canvas: bouncing stats box + drifting star field."""
+    """Matrix rain background + bouncing stats box."""
 
     DEFAULT_CSS = """
     _ScreensaverWidget {
@@ -412,46 +417,65 @@ class _ScreensaverWidget(Widget):
     }
     """
 
-    def __init__(self, state: StateManager) -> None:
+    def __init__(self, state: StateManager, du_result: str = "") -> None:
         super().__init__()
         self._state = state
+        self._du_result = du_result   # latest cached du output (updated by app)
         self._tick = 0
-        # Bouncing box
+
+        # Bouncing box — slower speed than before
         self._bx = 4.0
         self._by = 2.0
-        self._bdx = 0.38
-        self._bdy = 0.20
+        self._bdx = 0.15   # ~3× slower than original 0.38
+        self._bdy = 0.08   # ~2.5× slower than original 0.20
         self._color_iter = _icycle(_SS_COLORS)
         self._color = next(self._color_iter)
         self._corner_flash = 0
         self._corner_count = 0
-        # Particles
-        self._stars: list[list] = []   # [x, y, ch, speed]
+
         # Quote + typing animation
         self._quote = random.choice(_SS_QUOTES)
         self._quote_tick = 0
-        self._typed_len = 0     # chars revealed so far (typing effect)
+        self._typed_len = 0
+
+        # Matrix rain: list of column state dicts
+        # {x, head_y, speed, chars: dict[int,str], tail_len}
+        self._matrix: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
         w = self.size.width or 80
         h = self.size.height or 24
-        for _ in range(60):
-            self._stars.append([
-                random.uniform(0, w),
-                random.uniform(0, h),
-                random.choice(_SS_PARTICLES),
-                random.uniform(0.02, 0.12),
-            ])
+        self._init_matrix(w, h)
         self.set_interval(1 / 20, self._step)
 
+    def _init_matrix(self, w: int, h: int) -> None:
+        """Create one rain column every 2 terminal columns."""
+        self._matrix = []
+        for x in range(0, w, 2):
+            tail = random.randint(5, max(6, h // 2))
+            self._matrix.append({
+                "x": x,
+                "head_y": random.uniform(-h, 0),   # stagger starts
+                "speed": random.uniform(0.25, 0.75),
+                "chars": {},
+                "tail_len": tail,
+            })
+
+    # ------------------------------------------------------------------
+    # Animation step
+    # ------------------------------------------------------------------
+
     def _pick_quote(self, stats: dict) -> str:
-        """Choose a contextually appropriate quote."""
-        active  = stats.get("downloading", 0)
-        failed  = stats.get("failed", 0)
-        done    = stats.get("completed", 0)
-        pool = list(_SS_QUOTES)
+        active = stats.get("downloading", 0)
+        failed = stats.get("failed", 0)
+        done   = stats.get("completed", 0)
+        pool   = list(_SS_QUOTES)
         if active > 0:
-            pool += _SS_QUOTES_ACTIVE * 3        # higher weight when downloading
+            pool += _SS_QUOTES_ACTIVE * 3
         if failed > 0:
             pool += _SS_QUOTES_FAILED * 2
         if done >= 100:
@@ -464,13 +488,27 @@ class _ScreensaverWidget(Widget):
         if w == 0:
             return
 
-        # Drift particles
-        for s in self._stars:
-            s[1] -= s[3]
-            if s[1] < 0:
-                s[1] = float(h)
-                s[0] = random.uniform(0, w)
-                s[2] = random.choice(_SS_PARTICLES)
+        # Re-init matrix if terminal resized significantly
+        if self._matrix and abs(self._matrix[-1]["x"] - (w - 2)) > 4:
+            self._init_matrix(w, h)
+
+        # Advance matrix rain columns
+        for col in self._matrix:
+            col["head_y"] += col["speed"]
+            hy = int(col["head_y"])
+            # Assign / randomise head character
+            if 0 <= hy < h:
+                col["chars"][hy] = random.choice(_MATRIX_CHARS)
+            # Randomly mutate a tail character
+            if col["chars"] and random.random() < 0.08:
+                y = random.choice(list(col["chars"].keys()))
+                col["chars"][y] = random.choice(_MATRIX_CHARS)
+            # Reset when fully off-screen
+            if col["head_y"] > h + col["tail_len"]:
+                col["head_y"] = random.uniform(-h * 0.5, 0)
+                col["chars"] = {}
+                col["tail_len"] = random.randint(5, max(6, h // 2))
+                col["speed"] = random.uniform(0.25, 0.75)
 
         # Bounce box
         max_bx = float(max(0, w - _BOX_W - 1))
@@ -492,20 +530,30 @@ class _ScreensaverWidget(Widget):
         if self._corner_flash > 0:
             self._corner_flash -= 1
 
-        # Advance typing animation (2 chars per tick = ~40 chars/s)
-        self._typed_len = min(len(self._quote), self._typed_len + 2)
+        # Typing animation — 1 char per 2 ticks ≈ 10 chars/s (readable pace)
+        self._typed_len = min(len(self._quote), self._typed_len + 1)
 
-        # Rotate quote every ~15 s, restart typing
-        if self._tick - self._quote_tick >= 300:
+        # New quote every ~20 s
+        if self._tick - self._quote_tick >= 400:
             stats = self._state.get_stats()
             self._quote = self._pick_quote(stats)
             self._quote_tick = self._tick
             self._typed_len = 0
 
+        # Sync du result from app if available
+        try:
+            self._du_result = self.app._du_result  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
         self.refresh()
 
+    # ------------------------------------------------------------------
+    # Box content
+    # ------------------------------------------------------------------
+
     def _build_box(self, stats: dict, downloading: list) -> list[str]:
-        inner = _BOX_W - 2   # 26 printable chars
+        inner = _BOX_W - 2   # 28 printable chars
         pad = lambda s: "│" + s[:inner].ljust(inner) + "│"  # noqa: E731
 
         queued  = stats.get("queued", 0)
@@ -515,49 +563,48 @@ class _ScreensaverWidget(Widget):
         on_disk = stats.get("already_downloaded", 0)
         total   = stats.get("total", 0)
 
-        title = "  ↓  M Y R I E N T"
         lines: list[str] = [
             "╭" + "─" * inner + "╮",
-            pad(title),
+            pad("  ↓  M Y R I E N T"),
             "│" + "─" * inner + "│",
         ]
 
-        # ── active section: show progress bar if anything is downloading ──
+        # Active download: progress bar + filename + speed
         if active > 0 and downloading:
             item = downloading[0]
             prog = max(0.0, min(100.0, item.progress))
-            bar_w = inner - 10          # "  >> [" + "] 100%" = 10 chars
+            bar_w = inner - 12          # "  >> [" + "] 100%  " = 12
             filled = int(prog / 100 * bar_w)
             bar = "█" * filled + "░" * (bar_w - filled)
             lines.append(pad(f"  >> [{bar}] {prog:3.0f}%"))
-            # Filename (truncated)
             name = Path(item.path).name
-            max_name = inner - 5
-            if len(name) > max_name:
-                name = name[:max_name - 3] + "..."
+            if len(name) > inner - 4:
+                name = name[:inner - 7] + "..."
             spd = item.speed
-            if spd >= 1_048_576:
-                spd_str = f"{spd/1_048_576:.1f}MB/s"
-            elif spd >= 1024:
-                spd_str = f"{spd/1024:.0f}KB/s"
-            elif spd > 0:
-                spd_str = f"{spd:.0f}B/s"
-            else:
-                spd_str = "..."
+            if   spd >= 1_048_576: spd_s = f"{spd/1_048_576:.1f} MB/s"  # noqa: E701
+            elif spd >= 1024:      spd_s = f"{spd/1024:.0f} KB/s"        # noqa: E701
+            elif spd > 0:          spd_s = f"{spd:.0f} B/s"              # noqa: E701
+            else:                  spd_s = "connecting..."               # noqa: E701
             lines.append(pad(f"  {name}"))
-            lines.append(pad(f"  {active} active  {spd_str}"))
+            lines.append(pad(f"  {active} active  {spd_s}"))
         else:
-            lines.append(pad(f"  downloading  {active:>5}"))
+            lines.append(pad(f"  downloading  {active:>6}"))
 
         lines += [
-            pad(f"  queued      {queued:>5}"),
-            pad(f"  done        {done:>5}"),
-            pad(f"  failed      {failed:>5}"),
-            pad(f"  on disk     {on_disk:>5}"),
-            pad(f"  total       {total:>5}"),
+            pad(f"  queued       {queued:>6}"),
+            pad(f"  done         {done:>6}"),
+            pad(f"  failed       {failed:>6}"),
+            pad(f"  on disk      {on_disk:>6}"),
+            pad(f"  total        {total:>6}"),
+            "│" + "─" * inner + "│",
+            pad(f"  disk used  {self._du_result or 'calculating...'}"),
             "╰" + "─" * inner + "╯",
         ]
         return lines
+
+    # ------------------------------------------------------------------
+    # Render
+    # ------------------------------------------------------------------
 
     def render(self) -> Text:
         w, h = self.size.width, self.size.height
@@ -566,13 +613,28 @@ class _ScreensaverWidget(Widget):
 
         buf = _Buf(w, h)
 
-        # ── particle field ──────────────────────────────────────────
-        for sx, sy, sch, _ in self._stars:
-            # digits/symbols get slightly brighter than dots
-            style = "dim #3a3a3a" if sch in "01λΣΠ∞#@%" else "dim #252525"
-            buf.put(int(sx), int(sy), sch, style)
+        # ── Matrix rain ──────────────────────────────────────────────
+        for col in self._matrix:
+            x  = col["x"]
+            hy = int(col["head_y"])
+            tl = col["tail_len"]
+            for y, ch in col["chars"].items():
+                dy = hy - y        # 0 = head; positive = tail above head
+                if dy < 0 or dy > tl:
+                    continue
+                if dy == 0:
+                    style = "bold bright_white"
+                elif dy <= 2:
+                    style = "bold #00ff41"   # classic Matrix green
+                elif dy <= 6:
+                    style = "#00cc33"
+                elif dy <= 12:
+                    style = "#007722"
+                else:
+                    style = "dim #003311"
+                buf.put(x, y, ch, style)
 
-        # ── stats box ───────────────────────────────────────────────
+        # ── Stats box ────────────────────────────────────────────────
         stats       = self._state.get_stats()
         downloading = self._state.get_downloading_items()
         bx, by      = int(self._bx), int(self._by)
@@ -582,12 +644,12 @@ class _ScreensaverWidget(Widget):
             if avail > 0:
                 buf.put_str(bx, by + i, line[:avail], box_style)
 
-        # ── corner flash ────────────────────────────────────────────
+        # ── Corner flash ─────────────────────────────────────────────
         if self._corner_flash > 0:
             msgs = [
                 " ★  CORNER!  ★ ",
                 " ★★  CORNER x2!  ★★ ",
-                " ★★★  HAT TRICK CORNER!  ★★★ ",
+                " ★★★  HAT TRICK!  ★★★ ",
             ]
             msg = msgs[min(self._corner_count - 1, len(msgs) - 1)]
             flash_style = (
@@ -598,31 +660,29 @@ class _ScreensaverWidget(Widget):
             cx = bx + (_BOX_W - len(msg)) // 2
             buf.put_str(max(0, cx), by + _BOX_H // 2, msg[:w], flash_style)
 
-        # ── pulse ring (appears when sin ≈ 0) ───────────────────────
-        pulse = int(abs(math.sin(self._tick / 20)) * 3)
-        if pulse == 0:
-            ring_style = f"dim {self._color}"
+        # ── Pulse ring ───────────────────────────────────────────────
+        if int(abs(math.sin(self._tick / 20)) * 3) == 0:
+            rs = f"dim {self._color}"
             rx1, ry1 = bx - 1, by - 1
             rx2, ry2 = bx + _BOX_W, by + _BOX_H
             for rx in range(rx1, rx2 + 1):
-                buf.put(rx, ry1, "·", ring_style)
-                buf.put(rx, ry2, "·", ring_style)
+                buf.put(rx, ry1, "·", rs)
+                buf.put(rx, ry2, "·", rs)
             for ry in range(ry1, ry2 + 1):
-                buf.put(rx1, ry, "·", ring_style)
-                buf.put(rx2, ry, "·", ring_style)
+                buf.put(rx1, ry, "·", rs)
+                buf.put(rx2, ry, "·", rs)
 
-        # ── quote with typing effect ─────────────────────────────────
+        # ── Quote (typing effect) ────────────────────────────────────
         if h > 4:
             revealed = self._quote[:self._typed_len]
-            cursor = "_" if (self._tick % 10) < 5 else " "
-            # don't show cursor once fully typed
-            display = revealed if self._typed_len >= len(self._quote) else revealed + cursor
+            cursor   = "_" if (self._tick % 10) < 5 else " "
+            display  = revealed if self._typed_len >= len(self._quote) else revealed + cursor
             qx = max(0, (w - len(self._quote)) // 2)
-            buf.put_str(qx, h - 3, display[:w], "italic #5a5a5a")
+            buf.put_str(qx, h - 3, display[:w], "italic #4a7a4a")
 
-        # ── bottom hint ─────────────────────────────────────────────
+        # ── Bottom hint ──────────────────────────────────────────────
         hint = "any key to exit  ·  ~ to return"
-        buf.put_str(max(0, (w - len(hint)) // 2), h - 1, hint[:w], "dim #383838")
+        buf.put_str(max(0, (w - len(hint)) // 2), h - 1, hint[:w], "dim #1a3a1a")
 
         return buf.to_text()
 
@@ -635,7 +695,6 @@ class ScreensaverScreen(ModalScreen[None]):
         background: #000000;
         padding: 0;
         margin: 0;
-        layers: below above;
     }
     ScreensaverScreen > _ScreensaverWidget {
         width: 100%;
@@ -1253,6 +1312,9 @@ class MyrientBrowser(App):
 
         yield Footer()
 
+    # Cached output of `du [-h] -s downloads/` updated every 15 s in background
+    _du_result: str = ""
+
     def on_mount(self) -> None:
         """Initialize on mount."""
         self.title = "Myrient Browser"
@@ -1261,6 +1323,9 @@ class MyrientBrowser(App):
         # Start downloader immediately (doesn't need index)
         self.start_downloader()
         self.set_interval(1.0, self.update_download_panel)
+        # Kick off du refresh; first call is immediate, then every 15 s
+        self._refresh_du()
+        self.set_interval(15.0, self._refresh_du)
 
         # Load index in background if not already loaded
         if self.index is None:
@@ -1269,6 +1334,39 @@ class MyrientBrowser(App):
             self.load_index_async()
         else:
             self._finish_index_load()
+
+    @work(thread=True)
+    def _refresh_du(self) -> None:
+        """Run `du [-h] -s <downloads_dir>` in a background thread and cache result."""
+        try:
+            dl_dir = Path(self.config.download.directory)
+            if not dl_dir.exists():
+                return
+            use_h = getattr(self.config.display, "du_human_readable", False)
+            args = ["du", "-sh", str(dl_dir)] if use_h else ["du", "-s", str(dl_dir)]
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                raw = result.stdout.split("\t")[0].strip()
+                if use_h:
+                    self._du_result = raw          # e.g. "4.2G"
+                else:
+                    # raw is block count; convert to bytes (512-byte blocks on macOS,
+                    # 1024-byte on Linux — detect via sys.platform)
+                    try:
+                        blocks = int(raw)
+                        block_size = 512 if sys.platform == "darwin" else 1024
+                        total_bytes = blocks * block_size
+                        self._du_result = format_size(total_bytes)
+                    except ValueError:
+                        self._du_result = raw
+        except Exception:  # noqa: BLE001
+            pass
+        self.call_from_thread(self.update_stats)
 
     @work(exclusive=True, thread=True)
     def load_index_async(self) -> None:
@@ -1480,10 +1578,18 @@ class MyrientBrowser(App):
             else:
                 current_folder_info = f"\n[bold]View total:[/bold] {format_size(view_total)} ({len(self.current_items)} items)"
 
-        stats = f"""[bold]Index:[/bold] {index_info}
-[bold]Selected:[/bold] {selected_count}{selected_size_str}{current_folder_info}
-[bold]Queue:[/bold] {queue_stats['queued']} queued, {queue_stats['downloading']} active
-[bold]Done:[/bold] {queue_stats['completed']} completed, {queue_stats['failed']} failed"""
+        du_line = f"\n[bold]Disk used:[/bold] {self._du_result}" if self._du_result else ""
+
+        stats = (
+            f"[bold]Index:[/bold] {index_info}\n"
+            f"[bold]Selected:[/bold] {selected_count}{selected_size_str}"
+            f"{current_folder_info}\n"
+            f"[bold]Queue:[/bold] {queue_stats['queued']} queued, "
+            f"{queue_stats['downloading']} active\n"
+            f"[bold]Done:[/bold] {queue_stats['completed']} completed, "
+            f"{queue_stats['failed']} failed"
+            f"{du_line}"
+        )
 
         stats_panel.update(stats)
 

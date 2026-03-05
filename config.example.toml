@@ -99,3 +99,8 @@ state_file = "state.json"
 # Set to false for binary units (1 KiB = 1024 bytes, 1 TiB = 1024 GiB)
 # Decimal units match what most websites and storage vendors report
 use_decimal_units = true
+
+# Show human-readable output in `du` disk-usage reports (adds -h flag).
+# false (default) = raw block count converted to your unit setting.
+# true  = let `du` format the number (e.g. "4.2G") — ignores use_decimal_units.
+du_human_readable = false

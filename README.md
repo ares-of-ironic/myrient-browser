@@ -11,9 +11,14 @@ This tool is intended solely for downloading content you have legal rights to ac
 - **Interactive TUI** — directory tree browser, fuzzy search, multi-selection
 - **Fast search** — powered by [ripgrep](https://github.com/BurntSushi/ripgrep) (sub-second even for rare terms), OR operator (`|`) supported
 - **File & folder sizes** — displayed in browser, info panel and download queue (requires JSON index)
+- **Disk usage** — live `du -s downloads/` shown in the stats panel and screensaver
+- **Segmented downloads** — parallel HTTP Range segments per file for maximum throughput
+- **Dynamic concurrency** — adjust simultaneous downloads with `+`/`-` in the Downloads tab
 - **Download queue** — parallel downloads with resume (HTTP Range), exponential backoff retry
 - **Large directory support** — paginated listing (500 items/page) so folders with 15k+ files never freeze the UI
-- **Queue management** — retry, remove, clear completed/failed, search and filter by status
+- **Queue management** — retry, priority promotion, remove, clear completed/failed, search and filter by status
+- **Already-downloaded detection** — files already on disk are flagged when queued; forced re-download available
+- **Screensaver** — Matrix rain background with live download stats and easter eggs (`~` or `` ` ``)
 - **Export** — save selected paths to file (plain paths / URLs / JSON)
 - **Persistent queue** — state saved to disk, survives restarts
 - **Batch CLI mode** — scriptable commands for search, export, queue and download
@@ -74,14 +79,18 @@ Key settings in `config.toml`:
 base_url = "https://myrient.erista.me/files"
 
 [download]
-concurrency = 4        # parallel downloads
+concurrency = 4             # parallel downloads (adjustable at runtime with +/-)
 retries = 3
+segments_per_file = 4       # parallel HTTP Range segments per file (1 = off)
+min_segmented_mb = 8.0      # minimum file size (MB) to trigger segmented download
 
 [index]
 index_file = "directory/all_paths.json"   # or all_paths.txt
+search_limit = 500          # max results returned by fuzzy/rg search
 
 [display]
-use_decimal_units = true   # true = KB/MB/GB/TB  |  false = KiB/MiB/GiB/TiB
+use_decimal_units = true    # true = KB/MB/GB/TB  |  false = KiB/MiB/GiB/TiB
+du_human_readable = false   # true = let du format output (e.g. "4.2G")
 ```
 
 Environment variables are also supported:
@@ -128,12 +137,24 @@ The index is loaded in the background — a loading screen is shown on startup.
 |-----|--------|
 | `/` | Focus search input |
 | `1`–`5` | Filter: All / Queued / Active / Done / Failed |
-| `p` | Retry selected download |
+| `p` | Retry / resume selected download (moves to front of queue) |
+| `u` | Promote selected queued item to top priority |
 | `x` | Remove selected from queue |
 | `f` | Retry all failed downloads |
+| `F` | Force re-download (even if file already exists on disk) |
 | `k` | Clear completed downloads |
 | `X` | Clear entire queue (confirmation required) |
+| `+` / `-` | Increase / decrease concurrent download slots |
+| `]` / `[` | Next / previous page |
 | `Escape` | Clear search and filters |
+
+#### Global shortcuts
+
+| Key | Action |
+|-----|--------|
+| `~` / `` ` `` | Toggle screensaver (Matrix rain + live stats) |
+| `h` | Help screen |
+| `q` | Quit |
 
 ### Batch CLI
 

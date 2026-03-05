@@ -75,6 +75,8 @@ class DisplayConfig:
 
     # Use decimal units (1 KB = 1000 B) instead of binary (1 KB = 1024 B)
     use_decimal_units: bool = True
+    # Pass -h to du (human-readable sizes). False = raw block count (faster, exact).
+    du_human_readable: bool = False
 
 
 @dataclass
