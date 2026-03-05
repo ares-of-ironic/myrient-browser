@@ -968,8 +968,9 @@ class DownloadPanel(Static):
         widget = self.query_one("#download-concurrency", Static)
         if paused_all:
             slots_text = (
-                "[bold yellow on dark_orange] ⏸  ALL DOWNLOADS PAUSED [/bold yellow on dark_orange]"
-                "  [dim]Press [bold]R[/bold] to resume[/dim]"
+                "[bold yellow] ⏸  Queue paused[/bold yellow]"
+                "  [dim](existing items frozen — new items still download freely)[/dim]"
+                "  [dim]Press [bold]R[/bold] to resume all[/dim]"
             )
         else:
             bar = "█" * concurrency + "░" * max(0, 16 - concurrency)
@@ -2587,28 +2588,31 @@ class MyrientBrowser(App):
         self.update_download_panel()
 
     async def action_pause_all_downloads(self) -> None:
-        """Pause all active downloads without removing them from the queue [P]."""
+        """Freeze all existing queued/active items; new items still download [P]."""
         if not self._is_downloads_tab() or not self.downloader:
             return
-        if self.downloader.paused_all:
-            self.notify("Downloads already paused — press R to resume", severity="warning")
+        stats = self.state.get_stats()
+        candidates = stats.get("queued", 0) + stats.get("downloading", 0)
+        if candidates == 0:
+            self.notify("Nothing to pause (no queued or active downloads)", severity="warning")
             return
         await self.downloader.pause_all()
         self.notify(
-            "⏸  All downloads paused.  Press [R] to resume.",
+            f"⏸  {candidates} item(s) paused — new downloads still start normally.  [R] to resume.",
             severity="warning",
         )
         self.update_download_panel()
 
     async def action_resume_all_downloads(self) -> None:
-        """Resume all paused downloads [R]."""
+        """Move all PAUSED items back to QUEUED [R]."""
         if not self._is_downloads_tab() or not self.downloader:
             return
-        if not self.downloader.paused_all:
-            self.notify("Downloads are not paused", severity="information")
+        paused_count = self.state.get_stats().get("paused", 0)
+        if paused_count == 0:
+            self.notify("No paused items to resume", severity="information")
             return
         await self.downloader.resume_all()
-        self.notify("▶  Downloads resumed.", severity="information")
+        self.notify(f"▶  {paused_count} item(s) resumed.", severity="information")
         self.update_download_panel()
 
     def action_clear_throttle(self) -> None:

@@ -77,7 +77,9 @@ class DownloadManager:
         self.on_error = on_error
 
         self._running = False
-        self._paused_all = False     # True when user explicitly pauses ALL downloads
+        # UI indicator only — does NOT block the queue loop.
+        # Set when user presses P (pause existing items), cleared on R (resume).
+        self._queue_paused = False
         self._semaphore: asyncio.Semaphore | None = None
         self._tasks: dict[str, asyncio.Task] = {}
         self._client: httpx.AsyncClient | None = None
@@ -118,59 +120,59 @@ class DownloadManager:
 
     @property
     def paused_all(self) -> bool:
-        """True when the user has globally paused all downloads."""
-        return self._paused_all
+        """True when the user has pressed P to pause existing items.
+
+        This is a UI indicator only — the download loop is never blocked.
+        New items added while paused_all=True download normally.
+        """
+        return self._queue_paused
 
     async def pause_all(self) -> None:
-        """Pause all active downloads and stop accepting new ones.
+        """Freeze all existing queued/active items without blocking new ones.
 
-        In-flight downloads are cancelled and their items are marked PAUSED.
-        The download queue is preserved — call resume_all() to continue.
+        - QUEUED items → PAUSED  (skipped by the queue loop)
+        - DOWNLOADING items → cancelled and marked PAUSED
+        - Queue loop keeps running; any NEW item added as QUEUED starts immediately.
+        - Call resume_all() to move PAUSED items back to QUEUED.
         """
-        if self._paused_all:
-            return
-        self._paused_all = True
-        logger.info("Pausing all downloads")
+        self._queue_paused = True
+        logger.info("Pausing existing queue items")
 
-        # Mark status BEFORE cancelling — cancellation path (httpx cleanup,
-        # retry logic) must not overwrite PAUSED with QUEUED/FAILED.
+        # Mark QUEUED items as PAUSED before touching tasks so the queue loop
+        # doesn't pick them up again between the status write and task cancel.
+        for item in self.state.get_queued_items():
+            self.state.update_item(item.path, status=DownloadStatus.PAUSED)
+
+        # Mark DOWNLOADING items PAUSED first (guards _handle_failure race)
         active_paths = list(self._tasks.keys())
         for path in active_paths:
             self.state.update_item(path, status=DownloadStatus.PAUSED)
-
-        # Catch any DOWNLOADING items not yet in _tasks (race window at task start)
+        # Edge-case: DOWNLOADING items not yet in _tasks
         for item in self.state.get_downloading_items():
             self.state.update_item(item.path, status=DownloadStatus.PAUSED)
 
         self.state.save(force=True)
 
-        # Cancel tasks and wait for all of them to finish cleanly
+        # Cancel in-flight tasks and wait for clean shutdown
         for task in self._tasks.values():
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
 
-        logger.info("All downloads paused")
+        logger.info("Queue items paused — download loop still running for new items")
 
     async def resume_all(self) -> None:
-        """Resume all paused downloads.
+        """Move all PAUSED items back to QUEUED so they resume downloading."""
+        self._queue_paused = False
+        logger.info("Resuming paused queue items")
 
-        PAUSED items are moved back to QUEUED and the download loop resumes.
-        """
-        if not self._paused_all:
-            return
-        self._paused_all = False
-        logger.info("Resuming all downloads")
-
-        # Move every PAUSED item back to QUEUED
         for item in self.state.get_items_by_status(DownloadStatus.PAUSED):
             self.state.update_item(item.path, status=DownloadStatus.QUEUED)
         self.state.save(force=True)
 
-        # Kick off the queue processor again
-        asyncio.create_task(self._process_queue())
-        logger.info("Downloads resumed")
+        # Queue loop is already running; it will pick up QUEUED items on next tick
+        logger.info("All paused items moved back to QUEUED")
 
     def set_concurrency(self, value: int) -> int:
         """Change the number of parallel downloads while running.
@@ -388,7 +390,7 @@ class DownloadManager:
         Respects throttle windows triggered by 429/503 responses and the
         global pause flag set by pause_all().
         """
-        while self._running and not self._paused_all:
+        while self._running:
             # Wait out any server-imposed throttle before starting new downloads
             now = time.time()
             if self._throttled_until > now:
