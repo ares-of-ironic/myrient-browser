@@ -16,7 +16,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Key
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -993,6 +993,204 @@ class DownloadPanel(Static):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Settings tab
+# ---------------------------------------------------------------------------
+
+class SettingsPanel(Widget):
+    """Settings form — renders all config fields grouped by section.
+
+    Layout: scrollable list of (label | input/switch) rows.
+    Changes are applied to the in-memory Config object and written to
+    config.toml when the user presses Save (S) or the Save button.
+    """
+
+    # Emitted when the user saves settings
+    class Saved(Message):
+        pass
+
+    # Emitted when values changed in memory but not yet written
+    class Changed(Message):
+        pass
+
+    DEFAULT_CSS = ""  # CSS lives in MyrientBrowser.DEFAULT_CSS
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._config = config
+        self._errors: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Schema: sections → rows
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _schema() -> list[tuple[str, list[tuple[str, str, str, str]]]]:
+        """Return (section_label, [(field_id, label, type, hint), ...])."""
+        return [
+            ("Server", [
+                ("server.base_url",         "Base URL",             "str",   ""),
+                ("server.user_agent",        "User-Agent",           "str",   ""),
+            ]),
+            ("Download", [
+                ("download.download_dir",    "Download directory",   "str",   "path — relative to project root"),
+                ("download.concurrency",     "Concurrency",          "int",   "1–32 parallel downloads  ★ live"),
+                ("download.segments_per_file","Segments per file",   "int",   "parallel Range segments (1 = off)  ★ live"),
+                ("download.retries",         "Retries",              "int",   "attempts per file on error"),
+                ("download.retry_delay",     "Retry delay (s)",      "float", "base backoff in seconds"),
+                ("download.max_retry_delay", "Max retry delay (s)",  "float", "backoff cap"),
+                ("download.chunk_size",      "Chunk size (bytes)",   "int",   "512 KB = 524288"),
+                ("download.timeout",         "Timeout (s)",          "int",   "per-request timeout"),
+                ("download.rate_limit",      "Rate limit (req/s)",   "float", "0 = disabled"),
+                ("download.min_segmented_mb","Min segmented (MB)",   "float", "file size threshold for segmenting"),
+            ]),
+            ("Index", [
+                ("index.index_file",         "Index file",           "str",   "path to all_paths.json / .txt"),
+                ("index.search_limit",       "Search limit",         "int",   "max fuzzy-search results"),
+                ("index.watch_enabled",      "Watch for changes",    "bool",  "reload index on file change"),
+                ("index.watch_interval",     "Watch interval (s)",   "int",   "seconds between index checks"),
+            ]),
+            ("Export", [
+                ("export.export_dir",        "Export directory",     "str",   ""),
+                ("export.default_filename",  "Default filename",     "str",   ""),
+            ]),
+            ("Display", [
+                ("display.use_decimal_units","Decimal units (KB/MB)","bool",  "off = binary KiB/MiB  ★ live"),
+                ("display.du_human_readable","du -h readable",       "bool",  "let du format output  ★ live"),
+            ]),
+            ("Logging", [
+                ("logging.log_file",         "Log file",             "str",   ""),
+                ("logging.log_level",        "Log level",            "str",   "DEBUG / INFO / WARNING / ERROR"),
+            ]),
+        ]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_value(self, field_id: str) -> Any:
+        section, key = field_id.split(".", 1)
+        return getattr(getattr(self._config, section), key)
+
+    def _set_value(self, field_id: str, raw: str, type_: str) -> str | None:
+        """Parse raw string, set on config, return error string or None."""
+        section, key = field_id.split(".", 1)
+        obj = getattr(self._config, section)
+        try:
+            if type_ == "bool":
+                # booleans are handled by Switch, raw is "true"/"false"
+                value: Any = raw.lower() in ("true", "1", "on")
+            elif type_ == "int":
+                value = int(raw)
+            elif type_ == "float":
+                value = float(raw)
+            else:
+                value = raw
+            setattr(obj, key, value)
+            return None
+        except (ValueError, TypeError) as exc:
+            return str(exc)
+
+    # ------------------------------------------------------------------
+    # Compose
+    # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        with ScrollableContainer(id="settings-scroll"):
+            for section_label, rows in self._schema():
+                yield Static(
+                    f"[bold cyan]── {section_label} {'─' * max(0, 42 - len(section_label))}[/bold cyan]",
+                    classes="settings-section-header",
+                )
+                for field_id, label, type_, hint in rows:
+                    row_id = f"settings-row-{field_id.replace('.', '-')}"
+                    with Horizontal(classes="settings-row", id=row_id):
+                        yield Label(label, classes="settings-label")
+                        if type_ == "bool":
+                            current = bool(self._get_value(field_id))
+                            yield Switch(
+                                value=current,
+                                id=f"sf-{field_id.replace('.', '-')}",
+                                classes="settings-switch",
+                            )
+                            yield Static(
+                                f"[dim]{hint}[/dim]" if hint else "",
+                                classes="settings-hint",
+                            )
+                        else:
+                            current_str = str(self._get_value(field_id))
+                            yield Input(
+                                value=current_str,
+                                id=f"sf-{field_id.replace('.', '-')}",
+                                classes="settings-input",
+                            )
+                            yield Static(
+                                f"[dim]{hint}[/dim]" if hint else "",
+                                classes="settings-hint",
+                            )
+
+            # Action buttons
+            with Horizontal(id="settings-buttons"):
+                yield Button("💾  Save to config.toml  (S)", id="btn-settings-save", variant="success")
+                yield Button("⚡  Apply live settings", id="btn-settings-apply", variant="primary")
+                yield Button("↩  Reload from file", id="btn-settings-reload", variant="default")
+            yield Static(
+                "[dim]★ live = applies immediately without restart[/dim]",
+                id="settings-footer-note",
+            )
+            yield Static("", id="settings-status")
+
+    # ------------------------------------------------------------------
+    # Gather & validate
+    # ------------------------------------------------------------------
+
+    def gather_and_validate(self) -> dict[str, str] | None:
+        """Read all form widgets, validate, update config.
+
+        Returns a dict of {field_id: error_msg} if there are validation
+        errors, or None if everything is OK (config already updated).
+        """
+        errors: dict[str, str] = {}
+        for _, rows in self._schema():
+            for field_id, _, type_, _ in rows:
+                widget_id = f"sf-{field_id.replace('.', '-')}"
+                try:
+                    if type_ == "bool":
+                        widget = self.query_one(f"#{widget_id}", Switch)
+                        raw = "true" if widget.value else "false"
+                    else:
+                        widget = self.query_one(f"#{widget_id}", Input)
+                        raw = widget.value.strip()
+                    err = self._set_value(field_id, raw, type_)
+                    if err:
+                        errors[field_id] = err
+                except Exception as exc:
+                    errors[field_id] = str(exc)
+        return errors if errors else None
+
+    def show_status(self, msg: str, style: str = "green") -> None:
+        try:
+            self.query_one("#settings-status", Static).update(
+                f"[{style}]{msg}[/{style}]"
+            )
+        except Exception:
+            pass
+
+    def reload_from_config(self) -> None:
+        """Re-populate all form widgets from the current config object."""
+        for _, rows in self._schema():
+            for field_id, _, type_, _ in rows:
+                widget_id = f"sf-{field_id.replace('.', '-')}"
+                try:
+                    value = self._get_value(field_id)
+                    if type_ == "bool":
+                        self.query_one(f"#{widget_id}", Switch).value = bool(value)
+                    else:
+                        self.query_one(f"#{widget_id}", Input).value = str(value)
+                except Exception:
+                    pass
+
+
 class MyrientBrowser(App):
     """Main TUI application."""
 
@@ -1211,6 +1409,72 @@ class MyrientBrowser(App):
     #tab-browser {
         height: 1fr;
     }
+
+    /* ── Settings tab ─────────────────────────────────────────── */
+    #settings-panel {
+        height: 1fr;
+        padding: 0;
+    }
+
+    #settings-scroll {
+        height: 1fr;
+        padding: 1 2;
+    }
+
+    .settings-section-header {
+        padding-top: 1;
+        padding-bottom: 0;
+    }
+
+    .settings-row {
+        height: 3;
+        align: left middle;
+        padding: 0 0 0 1;
+    }
+
+    .settings-label {
+        width: 24;
+        padding-right: 1;
+        color: $text-muted;
+        content-align: right middle;
+    }
+
+    .settings-input {
+        width: 40;
+        height: 3;
+    }
+
+    .settings-switch {
+        width: 10;
+        height: 3;
+    }
+
+    .settings-hint {
+        width: 1fr;
+        padding-left: 2;
+        color: $text-disabled;
+        content-align: left middle;
+    }
+
+    #settings-buttons {
+        height: 5;
+        padding: 1 1;
+        align: left middle;
+    }
+
+    #settings-buttons Button {
+        margin-right: 2;
+    }
+
+    #settings-footer-note {
+        padding: 0 1;
+        color: $text-disabled;
+    }
+
+    #settings-status {
+        padding: 0 1;
+        height: 2;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -1249,6 +1513,7 @@ class MyrientBrowser(App):
         Binding("P", "pause_all_downloads", "Pause all", show=False),
         Binding("R", "resume_all_downloads", "Resume all", show=False),
         Binding("T", "clear_throttle", "Clear throttle", show=False),
+        Binding("S", "save_settings", "Save settings", show=False),
         # ~ / ` handled in on_key (Textual key names: tilde / grave_accent)
     ]
 
@@ -1300,6 +1565,13 @@ class MyrientBrowser(App):
         except Exception:
             return True
 
+    def _is_settings_tab(self) -> bool:
+        try:
+            tabs = self.query_one(TabbedContent)
+            return tabs.active == "tab-settings"
+        except Exception:
+            return False
+
     def _is_downloads_tab(self) -> bool:
         """Check if Downloads tab is active."""
         try:
@@ -1329,6 +1601,9 @@ class MyrientBrowser(App):
 
                     with TabPane("Downloads", id="tab-downloads"):
                         yield DownloadPanel(id="download-panel-content")
+
+                    with TabPane("Settings", id="tab-settings"):
+                        yield SettingsPanel(self.config, id="settings-panel")
 
             with Vertical(id="side-panel"):
                 yield InfoPanel(id="info-panel")
@@ -2369,6 +2644,111 @@ class MyrientBrowser(App):
     def action_screensaver(self) -> None:
         """Launch the screensaver (~)."""
         self.push_screen(ScreensaverScreen(self.state))
+
+    # ------------------------------------------------------------------
+    # Settings tab actions
+    # ------------------------------------------------------------------
+
+    def _get_settings_panel(self) -> SettingsPanel | None:
+        try:
+            return self.query_one("#settings-panel", SettingsPanel)
+        except Exception:
+            return None
+
+    def _apply_live_settings(self) -> list[str]:
+        """Apply settings that take effect immediately without restart.
+
+        Returns a list of human-readable change descriptions.
+        """
+        applied: list[str] = []
+
+        # Concurrency — can be changed on a live DownloadManager
+        if self.downloader:
+            new_c = self.config.download.concurrency
+            if self.downloader.concurrency != new_c:
+                self.downloader.set_concurrency(new_c)
+                applied.append(f"concurrency → {new_c}")
+
+        # Display units — format_size() reads config on every call
+        applied.append(
+            "decimal units " + ("on" if self.config.display.use_decimal_units else "off")
+        )
+
+        # du_human_readable — next _refresh_du() will pick up the new value
+        if self.config.display.du_human_readable:
+            applied.append("du -h enabled")
+
+        # Trigger an immediate du refresh and stats update
+        self._refresh_du()
+        self.update_stats()
+
+        return applied
+
+    def action_save_settings(self) -> None:
+        """Validate form, update config, write config.toml, apply live [S]."""
+        if not self._is_settings_tab():
+            return
+        panel = self._get_settings_panel()
+        if panel is None:
+            return
+
+        errors = panel.gather_and_validate()
+        if errors:
+            msgs = "; ".join(f"{k}: {v}" for k, v in errors.items())
+            panel.show_status(f"✗ Errors: {msgs}", style="red")
+            self.notify(f"Settings error: {msgs[:80]}", severity="error")
+            return
+
+        try:
+            self.config.save_to_toml()
+        except Exception as exc:
+            panel.show_status(f"✗ Save failed: {exc}", style="red")
+            self.notify(f"Save failed: {exc}", severity="error")
+            return
+
+        applied = self._apply_live_settings()
+        panel.show_status(
+            f"✓ Saved to config.toml  |  live: {', '.join(applied)}", style="green"
+        )
+        self.notify("Settings saved ✓", severity="information")
+
+    @on(Button.Pressed, "#btn-settings-save")
+    def _on_settings_save(self, _event: Button.Pressed) -> None:
+        self.action_save_settings()
+
+    @on(Button.Pressed, "#btn-settings-apply")
+    def _on_settings_apply(self, _event: Button.Pressed) -> None:
+        panel = self._get_settings_panel()
+        if panel is None:
+            return
+        errors = panel.gather_and_validate()
+        if errors:
+            msgs = "; ".join(f"{k}: {v}" for k, v in errors.items())
+            panel.show_status(f"✗ Errors: {msgs}", style="red")
+            return
+        applied = self._apply_live_settings()
+        panel.show_status(
+            f"⚡ Applied live: {', '.join(applied)}  (not saved to file)", style="yellow"
+        )
+        self.notify("Live settings applied ⚡", severity="information")
+
+    @on(Button.Pressed, "#btn-settings-reload")
+    def _on_settings_reload(self, _event: Button.Pressed) -> None:
+        """Reload config from file and refresh form widgets."""
+        panel = self._get_settings_panel()
+        if panel is None:
+            return
+        try:
+            config_path = self.config.project_root / "config.toml"
+            if config_path.exists():
+                self.config._load_from_file(config_path)
+                panel.reload_from_config()
+                panel.show_status("↩ Reloaded from config.toml", style="cyan")
+                self.notify("Config reloaded", severity="information")
+            else:
+                panel.show_status("config.toml not found — using defaults", style="yellow")
+        except Exception as exc:
+            panel.show_status(f"✗ Reload failed: {exc}", style="red")
 
     async def action_quit(self) -> None:
         """Quit application."""
