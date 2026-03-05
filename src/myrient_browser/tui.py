@@ -246,6 +246,11 @@ class HelpScreen(ModalScreen[None]):
   [red]Failed[/red]      Download failed (use [yellow]p[/yellow] or [yellow]F[/yellow] to retry)
   [yellow]Paused[/yellow]      Individually paused item
 
+[bold]── Tab switching ────────────────────────────[/bold]
+  [yellow]b[/yellow]           Switch to [underline]B[/underline]rowser tab
+  [yellow]D[/yellow]           Switch to [underline]D[/underline]ownloads tab
+  [yellow]s[/yellow]           Switch to [underline]S[/underline]ettings tab
+
 [bold]── General ──────────────────────────────────[/bold]
   [yellow]h[/yellow]           Show / close this help
   [yellow]~[/yellow]           Screensaver  [dim](press any key to return)[/dim]
@@ -1487,6 +1492,10 @@ class MyrientBrowser(App):
         Binding("q", "quit", "Quit"),
         Binding("h", "show_help", "Help"),
         Binding("escape", "clear_or_back", "Clear/Back"),
+        # Tab switching
+        Binding("b", "switch_to_browser", "Browser", show=False),
+        Binding("D", "switch_to_downloads", "Downloads", show=False),
+        Binding("s", "switch_to_settings", "Settings", show=False),
         # Browser tab
         Binding("/", "focus_search", "Search", show=False),
         Binding("space", "toggle_select", "Select", show=False),
@@ -1590,8 +1599,8 @@ class MyrientBrowser(App):
 
         with Horizontal():
             with Vertical(id="main-container"):
-                with TabbedContent():
-                    with TabPane("Browser", id="tab-browser"):
+                with TabbedContent(id="main-tabs"):
+                    with TabPane("[underline]B[/underline]rowser", id="tab-browser"):
                         with Container(id="browser-panel"):
                             with Container(id="search-container"):
                                 yield Input(
@@ -1604,10 +1613,10 @@ class MyrientBrowser(App):
                             yield Static("", id="path-display")
                             yield ListView(id="file-list")
 
-                    with TabPane("Downloads", id="tab-downloads"):
+                    with TabPane("[underline]D[/underline]ownloads", id="tab-downloads"):
                         yield DownloadPanel(id="download-panel-content")
 
-                    with TabPane("Settings", id="tab-settings"):
+                    with TabPane("[underline]S[/underline]ettings", id="tab-settings"):
                         yield SettingsPanel(self.config, id="settings-panel")
 
             with Vertical(id="side-panel"):
@@ -2724,6 +2733,34 @@ class MyrientBrowser(App):
     def action_screensaver(self) -> None:
         """Launch the screensaver (~)."""
         self.push_screen(ScreensaverScreen(self.state))
+
+    # ------------------------------------------------------------------
+    # Tab switching actions
+    # ------------------------------------------------------------------
+
+    def action_switch_to_browser(self) -> None:
+        """Switch to Browser tab (b)."""
+        try:
+            tabs = self.query_one("#main-tabs", TabbedContent)
+            tabs.active = "tab-browser"
+        except Exception:
+            pass
+
+    def action_switch_to_downloads(self) -> None:
+        """Switch to Downloads tab (D)."""
+        try:
+            tabs = self.query_one("#main-tabs", TabbedContent)
+            tabs.active = "tab-downloads"
+        except Exception:
+            pass
+
+    def action_switch_to_settings(self) -> None:
+        """Switch to Settings tab (s)."""
+        try:
+            tabs = self.query_one("#main-tabs", TabbedContent)
+            tabs.active = "tab-settings"
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Settings tab actions
