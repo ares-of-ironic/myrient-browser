@@ -132,19 +132,25 @@ class DownloadManager:
         self._paused_all = True
         logger.info("Pausing all downloads")
 
-        # Cancel every active download task
-        for path, task in list(self._tasks.items()):
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._tasks.clear()
+        # Mark status BEFORE cancelling — cancellation path (httpx cleanup,
+        # retry logic) must not overwrite PAUSED with QUEUED/FAILED.
+        active_paths = list(self._tasks.keys())
+        for path in active_paths:
+            self.state.update_item(path, status=DownloadStatus.PAUSED)
 
-        # Mark all DOWNLOADING items as PAUSED so the queue doesn't restart them
+        # Catch any DOWNLOADING items not yet in _tasks (race window at task start)
         for item in self.state.get_downloading_items():
             self.state.update_item(item.path, status=DownloadStatus.PAUSED)
+
         self.state.save(force=True)
+
+        # Cancel tasks and wait for all of them to finish cleanly
+        for task in self._tasks.values():
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        self._tasks.clear()
+
         logger.info("All downloads paused")
 
     async def resume_all(self) -> None:
@@ -798,6 +804,10 @@ class DownloadManager:
 
     async def _handle_failure(self, item: DownloadItem, error: str) -> None:
         """Handle download failure."""
+        # Don't overwrite PAUSED — pause_all() sets it before cancelling tasks
+        current = self.state.state.items.get(item.path)
+        if current and current.status == DownloadStatus.PAUSED:
+            return
         item.status = DownloadStatus.FAILED
         item.error = error
         self.state.update_item(
