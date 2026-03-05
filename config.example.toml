@@ -114,3 +114,16 @@ force_mb_in_downloads = false
 
 # Show combined download speed in Downloads summary line
 show_total_speed = true
+
+# Color palette for the UI. Available palettes:
+#   default    - Cyan/Blue (default Textual theme)
+#   neon       - Hot pink/Cyan (eye-catching)
+#   c64        - Commodore 64 inspired
+#   mc         - Midnight Commander style
+#   matrix     - Matrix green
+#   amber      - Amber terminal
+#   dracula    - Dracula theme
+#   solarized  - Solarized colors
+#   gruvbox    - Gruvbox theme
+#   synthwave  - Synthwave/Retrowave
+color_palette = "default"

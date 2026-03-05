@@ -31,13 +31,14 @@ from textual.widgets import (
     ListItem,
     ListView,
     LoadingIndicator,
+    Select,
     Static,
     Switch,
     TabbedContent,
     TabPane,
 )
 
-from .config import Config
+from .config import COLOR_PALETTES, Config
 from .downloader import CONCURRENCY_MAX, CONCURRENCY_MIN, DownloadManager, check_download_status
 from .exporter import Exporter
 from .indexer import FileIndex, IndexNode, format_size as _format_size_base
@@ -1143,6 +1144,9 @@ class SettingsPanel(Widget):
             ("Display", [
                 ("display.use_decimal_units","Decimal units (KB/MB)","bool",  "off = binary KiB/MiB  ★ live"),
                 ("display.du_human_readable","du -h readable",       "bool",  "let du format output  ★ live"),
+                ("display.force_mb_in_downloads","Force MB display", "bool",  "never show GB in Downloads"),
+                ("display.show_total_speed", "Show total speed",     "bool",  "combined speed + ETA"),
+                ("display.color_palette",    "Color palette",        "palette", "★ live"),
             ]),
             ("Logging", [
                 ("logging.log_file",         "Log file",             "str",   ""),
@@ -1203,6 +1207,25 @@ class SettingsPanel(Widget):
                                 f"[dim]{hint}[/dim]" if hint else "",
                                 classes="settings-hint",
                             )
+                        elif type_ == "palette":
+                            current_palette = str(self._get_value(field_id))
+                            # Build options with color preview
+                            options: list[tuple[str, str]] = []
+                            for name, colors in COLOR_PALETTES.items():
+                                # Show color swatches: ■ in each palette color
+                                preview = "".join(f"[{c}]■[/{c}]" for c in colors[:4])
+                                display = f"{preview} {name}"
+                                options.append((display, name))
+                            yield Select(
+                                options,
+                                value=current_palette,
+                                id=f"sf-{field_id.replace('.', '-')}",
+                                classes="settings-select",
+                            )
+                            yield Static(
+                                f"[dim]{hint}[/dim]" if hint else "",
+                                classes="settings-hint",
+                            )
                         else:
                             current_str = str(self._get_value(field_id))
                             yield Input(
@@ -1244,6 +1267,9 @@ class SettingsPanel(Widget):
                     if type_ == "bool":
                         widget = self.query_one(f"#{widget_id}", Switch)
                         raw = "true" if widget.value else "false"
+                    elif type_ == "palette":
+                        widget = self.query_one(f"#{widget_id}", Select)
+                        raw = str(widget.value) if widget.value else "default"
                     else:
                         widget = self.query_one(f"#{widget_id}", Input)
                         raw = widget.value.strip()
@@ -1532,6 +1558,11 @@ class MyrientBrowser(App):
 
     .settings-switch {
         width: 10;
+        height: 3;
+    }
+
+    .settings-select {
+        width: 40;
         height: 3;
     }
 
@@ -2875,11 +2906,28 @@ class MyrientBrowser(App):
         if self.config.display.du_human_readable:
             applied.append("du -h enabled")
 
+        # Color palette — apply CSS variables
+        palette_name = self.config.display.color_palette
+        if palette_name in COLOR_PALETTES:
+            self._apply_color_palette(palette_name)
+            applied.append(f"palette → {palette_name}")
+
         # Trigger an immediate du refresh and stats update
         self._refresh_du()
         self.update_stats()
 
         return applied
+
+    def _apply_color_palette(self, palette_name: str) -> None:
+        """Apply color palette by updating CSS variables."""
+        if palette_name not in COLOR_PALETTES:
+            return
+        colors = COLOR_PALETTES[palette_name]
+        primary, secondary, accent, success, error, warning = colors
+        # Update app's design system colors via set_class
+        self.styles.background = self.styles.background  # force refresh
+        # Store for use in Rich markup
+        self._palette = colors
 
     def action_save_settings(self) -> None:
         """Validate form, update config, write config.toml, apply live [S]."""

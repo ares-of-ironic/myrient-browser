@@ -69,6 +69,21 @@ class StateConfig:
     state_file: str = "state.json"
 
 
+# Color palette definitions: (name, primary, secondary, accent, success, error, warning)
+COLOR_PALETTES: dict[str, tuple[str, str, str, str, str, str]] = {
+    "default":    ("#00d7ff", "#0087d7", "#ffaf00", "#00ff00", "#ff0000", "#ffff00"),  # Cyan/Blue
+    "neon":       ("#ff00ff", "#00ffff", "#ffff00", "#00ff00", "#ff0055", "#ff8800"),  # Hot pink/Cyan
+    "c64":        ("#8888ff", "#aa44ff", "#ffff77", "#77ff77", "#ff7777", "#ffff00"),  # C64 inspired
+    "mc":         ("#00ffff", "#ffff00", "#ffffff", "#00ff00", "#ff0000", "#ffff00"),  # Midnight Commander
+    "matrix":     ("#00ff00", "#008800", "#00ff00", "#00ff00", "#ff0000", "#88ff00"),  # Matrix green
+    "amber":      ("#ffaa00", "#ff8800", "#ffffff", "#ffff00", "#ff4400", "#ffcc00"),  # Amber terminal
+    "dracula":    ("#bd93f9", "#ff79c6", "#f1fa8c", "#50fa7b", "#ff5555", "#ffb86c"),  # Dracula theme
+    "solarized":  ("#268bd2", "#2aa198", "#b58900", "#859900", "#dc322f", "#cb4b16"),  # Solarized
+    "gruvbox":    ("#83a598", "#b8bb26", "#fabd2f", "#b8bb26", "#fb4934", "#fe8019"),  # Gruvbox
+    "synthwave":  ("#ff7edb", "#72f1b8", "#fede5d", "#72f1b8", "#fe4450", "#f97e72"),  # Synthwave
+}
+
+
 @dataclass
 class DisplayConfig:
     """Display configuration."""
@@ -81,6 +96,8 @@ class DisplayConfig:
     force_mb_in_downloads: bool = False
     # Show combined download speed in Downloads summary
     show_total_speed: bool = True
+    # Color palette name (see COLOR_PALETTES)
+    color_palette: str = "default"
 
 
 @dataclass
@@ -269,6 +286,7 @@ class Config:
             f"du_human_readable = {_bool(self.display.du_human_readable)}",
             f"force_mb_in_downloads = {_bool(self.display.force_mb_in_downloads)}",
             f"show_total_speed = {_bool(self.display.show_total_speed)}",
+            f"color_palette = {_str(self.display.color_palette)}",
             "",
         ]
 
