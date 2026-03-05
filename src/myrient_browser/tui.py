@@ -2313,6 +2313,12 @@ class MyrientBrowser(App):
                 )
             else:
                 self.notify(f"Added {added_new} files to queue")
+
+            # Clear selection after adding to queue
+            if self.selected_paths:
+                self.selected_paths.clear()
+                self.refresh_list(preserve_cursor=True)
+
             self.update_stats()
 
     def action_export(self) -> None:
