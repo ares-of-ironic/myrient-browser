@@ -205,6 +205,9 @@ class DownloadManager:
         # Reset orphaned downloads (stuck in DOWNLOADING from previous run)
         self._reset_orphaned_downloads()
 
+        # Clean up stale .seg* files that could force segmented mode unexpectedly
+        self._cleanup_stale_segment_files()
+
         segs = self.config.download.segments_per_file
         # Each concurrent download may open `segs` parallel segment connections.
         # Add a few extra for HEAD probes and retries.
@@ -232,6 +235,28 @@ class DownloadManager:
 
         # Start queue processor in background
         self._queue_task = asyncio.create_task(self._process_queue())
+
+    def _cleanup_stale_segment_files(self) -> None:
+        """Remove leftover .seg* files from previous segmented download attempts.
+
+        These files can cause problems when segments_per_file=1 (single-stream mode)
+        because the downloader detects them and switches to segmented mode, which
+        may trigger server rate-limiting (429) due to parallel requests.
+        """
+        download_dir = Path(self.config.download.directory)
+        if not download_dir.exists():
+            return
+
+        count = 0
+        for seg_file in download_dir.rglob("*.seg[0-9]*"):
+            try:
+                seg_file.unlink()
+                count += 1
+            except OSError:
+                pass
+
+        if count > 0:
+            logger.info(f"Cleaned up {count} stale segment file(s) from previous runs")
 
     def _reset_orphaned_downloads(self) -> None:
         """Reset downloads stuck in DOWNLOADING status from previous run."""
