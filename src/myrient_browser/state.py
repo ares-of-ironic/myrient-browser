@@ -296,6 +296,11 @@ class StateManager:
         with self._lock:
             return {k: max(0, v) for k, v in self._stats.items()}
 
+    def rebuild_stats(self) -> None:
+        """Force rebuild of stats cache from actual items (public API)."""
+        with self._lock:
+            self._rebuild_stats()
+
     @property
     def is_empty(self) -> bool:
         """Check if queue is empty."""

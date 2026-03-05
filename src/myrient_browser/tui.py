@@ -1624,6 +1624,9 @@ class MyrientBrowser(App):
         self.title = "Myrient Browser"
         self.sub_title = "Use responsibly - only download content you have rights to"
 
+        # Ensure stats cache is consistent with actual state
+        self.state.rebuild_stats()
+
         # Start downloader immediately (doesn't need index)
         self.start_downloader()
         self.set_interval(1.0, self.update_download_panel)
