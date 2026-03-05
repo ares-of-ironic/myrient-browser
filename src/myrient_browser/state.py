@@ -294,8 +294,9 @@ class StateManager:
             return count
 
     def get_stats(self) -> dict[str, int]:
-        """Get queue statistics (O(1) - uses incremental cache)."""
+        """Get queue statistics (rebuilds from scratch for accuracy)."""
         with self._lock:
+            self._rebuild_stats()
             return {k: max(0, v) for k, v in self._stats.items()}
 
     def rebuild_stats(self) -> None:
