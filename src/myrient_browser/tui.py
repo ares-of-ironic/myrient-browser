@@ -247,9 +247,9 @@ class HelpScreen(ModalScreen[None]):
   [yellow]Paused[/yellow]      Individually paused item
 
 [bold]── Tab switching ────────────────────────────[/bold]
-  [yellow]b[/yellow]           Switch to [underline]B[/underline]rowser tab
-  [yellow]D[/yellow]           Switch to [underline]D[/underline]ownloads tab
-  [yellow]s[/yellow]           Switch to [underline]S[/underline]ettings tab
+  [yellow]B[/yellow]           Switch to [underline]B[/underline]rowser tab
+  [yellow]L[/yellow]           Switch to Down[underline]l[/underline]oads tab
+  [yellow]O[/yellow]           Switch to [underline]O[/underline]ptions tab
 
 [bold]── General ──────────────────────────────────[/bold]
   [yellow]h[/yellow]           Show / close this help
@@ -1492,10 +1492,10 @@ class MyrientBrowser(App):
         Binding("q", "quit", "Quit"),
         Binding("h", "show_help", "Help"),
         Binding("escape", "clear_or_back", "Clear/Back"),
-        # Tab switching
-        Binding("b", "switch_to_browser", "Browser", show=False),
-        Binding("D", "switch_to_downloads", "Downloads", show=False),
-        Binding("s", "switch_to_settings", "Settings", show=False),
+        # Tab switching (uppercase, unused letters)
+        Binding("B", "switch_to_browser", "Browser", show=False),
+        Binding("L", "switch_to_downloads", "Downloads", show=False),
+        Binding("O", "switch_to_settings", "Settings/Options", show=False),
         # Browser tab
         Binding("/", "focus_search", "Search", show=False),
         Binding("space", "toggle_select", "Select", show=False),
@@ -1613,10 +1613,10 @@ class MyrientBrowser(App):
                             yield Static("", id="path-display")
                             yield ListView(id="file-list")
 
-                    with TabPane("[underline]D[/underline]ownloads", id="tab-downloads"):
+                    with TabPane("Down[underline]l[/underline]oads", id="tab-downloads"):
                         yield DownloadPanel(id="download-panel-content")
 
-                    with TabPane("[underline]S[/underline]ettings", id="tab-settings"):
+                    with TabPane("[underline]O[/underline]ptions", id="tab-settings"):
                         yield SettingsPanel(self.config, id="settings-panel")
 
             with Vertical(id="side-panel"):
