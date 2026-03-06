@@ -426,6 +426,21 @@ class _Buf:
             [(" ", "") for _ in range(w)] for _ in range(h)
         ]
 
+    def clear(self) -> None:
+        """Reset all cells to empty space (reuse buffer without reallocation)."""
+        for row in self._cells:
+            for i in range(len(row)):
+                row[i] = (" ", "")
+
+    def resize(self, w: int, h: int) -> None:
+        """Resize buffer if dimensions changed."""
+        if w == self.w and h == self.h:
+            self.clear()
+            return
+        self.w = w
+        self.h = h
+        self._cells = [[(" ", "") for _ in range(w)] for _ in range(h)]
+
     def put(self, x: int, y: int, ch: str, style: str = "") -> None:
         if 0 <= x < self.w and 0 <= y < self.h:
             self._cells[y][x] = (ch, style)
@@ -494,6 +509,9 @@ class _ScreensaverWidget(Widget):
         self._cached_downloading: list = []
         self._stats_tick = -100  # force immediate refresh
 
+        # Reusable render buffer (avoids allocation every frame)
+        self._buf: _Buf | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -502,7 +520,7 @@ class _ScreensaverWidget(Widget):
         w = self.size.width or 80
         h = self.size.height or 24
         self._init_matrix(w, h)
-        self.set_interval(1 / 15, self._step)  # 15 FPS for smoother performance
+        self.set_interval(1 / 20, self._step)  # 20 FPS for smooth animation
 
     def _init_matrix(self, w: int, h: int) -> None:
         """Create one rain column every 2 terminal columns."""
@@ -585,8 +603,8 @@ class _ScreensaverWidget(Widget):
         # Typing animation — 1 char per 2 ticks ≈ 10 chars/s (readable pace)
         self._typed_len = min(len(self._quote), self._typed_len + 1)
 
-        # Refresh cached stats every ~2 seconds (30 ticks at 15fps)
-        if self._tick - self._stats_tick >= 30:
+        # Refresh cached stats every ~2 seconds (40 ticks at 20fps)
+        if self._tick - self._stats_tick >= 40:
             self._cached_stats = self._state.get_stats()
             self._cached_downloading = self._state.get_downloading_items()
             self._stats_tick = self._tick
@@ -668,7 +686,12 @@ class _ScreensaverWidget(Widget):
         if w < 10 or h < 6:
             return Text()
 
-        buf = _Buf(w, h)
+        # Reuse buffer to avoid allocation every frame
+        if self._buf is None:
+            self._buf = _Buf(w, h)
+        else:
+            self._buf.resize(w, h)
+        buf = self._buf
 
         # ── Matrix rain ──────────────────────────────────────────────
         for col in self._matrix:
@@ -1705,7 +1728,10 @@ class MyrientBrowser(App):
             return False
 
     def _is_downloads_tab(self) -> bool:
-        """Check if Downloads tab is active."""
+        """Check if Downloads tab is active and no modal screen is covering it."""
+        # Skip if any modal screen is active (screensaver, dialogs, etc.)
+        if len(self.screen_stack) > 1:
+            return False
         try:
             tabs = self.query_one(TabbedContent)
             return tabs.active == "tab-downloads"
