@@ -1891,27 +1891,11 @@ class MyrientBrowser(App):
     def on_download_complete(self, item: DownloadItem) -> None:
         """Handle download completion."""
         self.downloaded_cache.add(item.path)
-        now = time.time()
-        if not hasattr(self, "_last_complete_notify"):
-            self._last_complete_notify = 0.0
-            self._complete_batch = 0
-        self._complete_batch += 1
-        if now - self._last_complete_notify >= 3.0:
-            if self._complete_batch == 1:
-                self.notify(f"Downloaded: {Path(item.path).name}")
-            else:
-                self.notify(f"Downloaded {self._complete_batch} files")
-            self._last_complete_notify = now
-            self._complete_batch = 0
+        self.notify(f"Downloaded: {Path(item.path).name}", timeout=2)
 
     def on_download_error(self, item: DownloadItem, error: str) -> None:
         """Handle download error."""
-        now = time.time()
-        if not hasattr(self, "_last_error_notify"):
-            self._last_error_notify = 0.0
-        if now - self._last_error_notify >= 3.0:
-            self.notify(f"Failed: {Path(item.path).name}", severity="error")
-            self._last_error_notify = now
+        self.notify(f"Failed: {Path(item.path).name}", severity="error", timeout=3)
 
     def on_index_reloaded(self) -> None:
         """Handle index reload."""
