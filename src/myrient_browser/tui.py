@@ -1728,10 +1728,7 @@ class MyrientBrowser(App):
             return False
 
     def _is_downloads_tab(self) -> bool:
-        """Check if Downloads tab is active and no modal screen is covering it."""
-        # Skip if any modal screen is active (screensaver, dialogs, etc.)
-        if len(self.screen_stack) > 1:
-            return False
+        """Check if Downloads tab is active."""
         try:
             tabs = self.query_one(TabbedContent)
             return tabs.active == "tab-downloads"
