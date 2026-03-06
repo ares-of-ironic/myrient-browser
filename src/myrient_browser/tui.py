@@ -2046,21 +2046,27 @@ class MyrientBrowser(App):
             return
 
         try:
-            all_items = self.state.get_all_items()
             stats = self.state.get_stats()
 
-            # Apply status filter
+            # Use indexed lookups instead of iterating through all 40k+ items
             status_filter = self.download_status_filter
             if status_filter == "queued":
-                items = [i for i in all_items if i.status in (DownloadStatus.QUEUED, DownloadStatus.PAUSED)]
+                items = (
+                    self.state.get_items_by_status(DownloadStatus.QUEUED) +
+                    self.state.get_items_by_status(DownloadStatus.PAUSED)
+                )
             elif status_filter == "active":
-                items = [i for i in all_items if i.status == DownloadStatus.DOWNLOADING]
+                items = self.state.get_items_by_status(DownloadStatus.DOWNLOADING)
             elif status_filter == "done":
-                items = [i for i in all_items if i.status in (DownloadStatus.COMPLETED, DownloadStatus.ALREADY_DOWNLOADED)]
+                items = (
+                    self.state.get_items_by_status(DownloadStatus.COMPLETED) +
+                    self.state.get_items_by_status(DownloadStatus.ALREADY_DOWNLOADED)
+                )
             elif status_filter == "failed":
-                items = [i for i in all_items if i.status == DownloadStatus.FAILED]
+                items = self.state.get_items_by_status(DownloadStatus.FAILED)
             else:
-                items = all_items
+                # "all" filter - use get_all_items only when necessary
+                items = self.state.get_all_items()
 
             # Apply search filter
             search_query = self.download_search_query.strip().lower()
@@ -2096,10 +2102,11 @@ class MyrientBrowser(App):
             end = min(start + page_size, total)
             page_items = items[start:end]
 
-            # Sizes must be computed from ALL items (not filtered), so that
-            # Total/Remaining always reflect the entire queue state.
-            all_total_size = sum(i.total_size for i in all_items if i.total_size > 0)
-            all_downloaded_size = sum(i.downloaded_size for i in all_items)
+            # Compute sizes from stats (O(1)) instead of iterating all items
+            # We track total/downloaded only for active items (downloading)
+            downloading_items = self.state.get_downloading_items()
+            all_total_size = sum(i.total_size for i in downloading_items if i.total_size > 0)
+            all_downloaded_size = sum(i.downloaded_size for i in downloading_items)
 
             # Build stats for summary
             filtered_stats = stats.copy()

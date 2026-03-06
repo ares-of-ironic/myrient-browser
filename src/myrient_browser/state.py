@@ -102,28 +102,43 @@ class StateManager:
             "paused": 0,
             "already_downloaded": 0,
         }
+        # Index: status -> set of paths (for O(1) lookups by status)
+        self._by_status: dict[str, set[str]] = {
+            "queued": set(),
+            "downloading": set(),
+            "completed": set(),
+            "failed": set(),
+            "paused": set(),
+            "already_downloaded": set(),
+        }
 
     def _rebuild_stats(self) -> None:
-        """Rebuild stats cache from scratch (call while holding _lock)."""
+        """Rebuild stats cache and status index from scratch (call while holding _lock)."""
         self._stats = {s: 0 for s in ("total", "queued", "downloading", "completed", "failed", "paused", "already_downloaded")}
-        for item in self.state.items.values():
+        self._by_status = {s: set() for s in ("queued", "downloading", "completed", "failed", "paused", "already_downloaded")}
+        for path, item in self.state.items.items():
             self._stats["total"] += 1
             self._stats[item.status.value] += 1
+            self._by_status[item.status.value].add(path)
 
     def _stats_add(self, item: DownloadItem) -> None:
         """Increment stats for a newly added item (call while holding _lock)."""
         self._stats["total"] += 1
         self._stats[item.status.value] += 1
+        self._by_status[item.status.value].add(item.path)
 
     def _stats_remove(self, item: DownloadItem) -> None:
         """Decrement stats for a removed item (call while holding _lock)."""
         self._stats["total"] -= 1
         self._stats[item.status.value] -= 1
+        self._by_status[item.status.value].discard(item.path)
 
-    def _stats_change_status(self, old_status: DownloadStatus, new_status: DownloadStatus) -> None:
-        """Update stats when an item changes status (call while holding _lock)."""
+    def _stats_change_status(self, old_status: DownloadStatus, new_status: DownloadStatus, path: str) -> None:
+        """Update stats and index when an item changes status (call while holding _lock)."""
         self._stats[old_status.value] -= 1
         self._stats[new_status.value] += 1
+        self._by_status[old_status.value].discard(path)
+        self._by_status[new_status.value].add(path)
 
     def load(self) -> None:
         """Load state from file."""
@@ -183,9 +198,9 @@ class StateManager:
                 for key, value in kwargs.items():
                     if hasattr(item, key):
                         setattr(item, key, value)
-                # Update stats if status changed (compare before setattr modified it)
+                # Update stats and index if status changed
                 if new_status is not None and new_status != old_status:
-                    self._stats_change_status(old_status, new_status)
+                    self._stats_change_status(old_status, new_status, path)
                 self._dirty = True
 
     def get_item(self, path: str) -> DownloadItem | None:
@@ -194,14 +209,16 @@ class StateManager:
             return self.state.items.get(path)
 
     def get_items_by_status(self, status: DownloadStatus) -> list[DownloadItem]:
-        """Get all items with given status."""
+        """Get all items with given status (O(k) where k = items with that status)."""
         with self._lock:
-            return [item for item in self.state.items.values() if item.status == status]
+            paths = self._by_status.get(status.value, set())
+            return [self.state.items[p] for p in paths if p in self.state.items]
 
     def get_queued_items(self) -> list[DownloadItem]:
         """Get queued items sorted by priority (lowest value first), then by added_at."""
         with self._lock:
-            items = [item for item in self.state.items.values() if item.status == DownloadStatus.QUEUED]
+            paths = self._by_status.get("queued", set())
+            items = [self.state.items[p] for p in paths if p in self.state.items]
         items.sort(key=lambda i: (i.priority, i.added_at))
         return items
 
@@ -214,9 +231,10 @@ class StateManager:
             item = self.state.items.get(path)
             if item is None:
                 return False
-            # Find the minimum priority currently in the queue and go one lower
+            # Find the minimum priority from queued items only (using index)
+            queued_paths = self._by_status.get("queued", set())
             min_priority = min(
-                (i.priority for i in self.state.items.values() if i.status == DownloadStatus.QUEUED),
+                (self.state.items[p].priority for p in queued_paths if p in self.state.items),
                 default=0,
             )
             item.priority = min_priority - 1
@@ -224,7 +242,7 @@ class StateManager:
         return True
 
     def get_downloading_items(self) -> list[DownloadItem]:
-        """Get all currently downloading items."""
+        """Get all currently downloading items (O(k) where k = downloading count)."""
         return self.get_items_by_status(DownloadStatus.DOWNLOADING)
 
     def get_completed_items(self) -> list[DownloadItem]:
@@ -240,41 +258,56 @@ class StateManager:
         with self._lock:
             return list(self.state.items.values())
 
+    def get_active_items(self) -> list[DownloadItem]:
+        """Get only active items (queued, downloading, failed, paused) - excludes completed/already_downloaded.
+        
+        This is much faster for large queues with many completed items.
+        """
+        with self._lock:
+            result = []
+            for status in ("queued", "downloading", "failed", "paused"):
+                for path in self._by_status.get(status, set()):
+                    if path in self.state.items:
+                        result.append(self.state.items[path])
+            return result
+
     def clear_completed(self) -> int:
         """Remove all completed items. Returns count removed."""
         with self._lock:
-            to_remove = [
-                (path, item) for path, item in self.state.items.items()
-                if item.status == DownloadStatus.COMPLETED
-            ]
-            for path, item in to_remove:
-                self._stats_remove(item)
-                del self.state.items[path]
-            if to_remove:
+            paths_to_remove = list(self._by_status.get("completed", set()))
+            count = 0
+            for path in paths_to_remove:
+                item = self.state.items.pop(path, None)
+                if item:
+                    self._stats_remove(item)
+                    count += 1
+            if count > 0:
                 self._dirty = True
-            return len(to_remove)
+            return count
 
     def clear_failed(self) -> int:
         """Remove all failed items. Returns count removed."""
         with self._lock:
-            to_remove = [
-                (path, item) for path, item in self.state.items.items()
-                if item.status == DownloadStatus.FAILED
-            ]
-            for path, item in to_remove:
-                self._stats_remove(item)
-                del self.state.items[path]
-            if to_remove:
+            paths_to_remove = list(self._by_status.get("failed", set()))
+            count = 0
+            for path in paths_to_remove:
+                item = self.state.items.pop(path, None)
+                if item:
+                    self._stats_remove(item)
+                    count += 1
+            if count > 0:
                 self._dirty = True
-            return len(to_remove)
+            return count
 
     def retry_failed(self) -> int:
         """Reset failed items to queued. Returns count reset."""
         with self._lock:
+            paths_to_retry = list(self._by_status.get("failed", set()))
             count = 0
-            for item in self.state.items.values():
-                if item.status == DownloadStatus.FAILED:
-                    self._stats_change_status(DownloadStatus.FAILED, DownloadStatus.QUEUED)
+            for path in paths_to_retry:
+                item = self.state.items.get(path)
+                if item and item.status == DownloadStatus.FAILED:
+                    self._stats_change_status(DownloadStatus.FAILED, DownloadStatus.QUEUED, path)
                     item.status = DownloadStatus.QUEUED
                     item.error = ""
                     item.retries = 0
@@ -311,9 +344,6 @@ class StateManager:
 
     @property
     def has_pending(self) -> bool:
-        """Check if there are pending downloads."""
+        """Check if there are pending downloads (O(1) using index)."""
         with self._lock:
-            return any(
-                item.status in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING)
-                for item in self.state.items.values()
-            )
+            return bool(self._by_status.get("queued") or self._by_status.get("downloading"))
