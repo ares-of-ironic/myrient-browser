@@ -1746,7 +1746,7 @@ class MyrientBrowser(App):
 
         # Start downloader immediately (doesn't need index)
         self.start_downloader()
-        self.set_interval(0.3, self.update_download_panel)  # 300ms for responsive UI
+        self.set_interval(0.5, self.update_download_panel)  # 500ms for balanced responsiveness
         # Kick off du refresh; first call is immediate, then every 15 s
         self._refresh_du()
         self.set_interval(15.0, self._refresh_du)
@@ -2026,6 +2026,10 @@ class MyrientBrowser(App):
 
     def update_download_panel(self, reset_page: bool = False) -> None:
         """Update download panel with search, status filtering and pagination."""
+        # Skip expensive updates when Downloads tab is not visible
+        if not reset_page and not self._is_downloads_tab():
+            return
+
         try:
             panel = self.query_one("#download-panel-content", DownloadPanel)
         except Exception:
