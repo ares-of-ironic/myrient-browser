@@ -214,11 +214,20 @@ class StateManager:
             paths = self._by_status.get(status.value, set())
             return [self.state.items[p] for p in paths if p in self.state.items]
 
-    def get_queued_items(self) -> list[DownloadItem]:
-        """Get queued items sorted by priority (lowest value first), then by added_at."""
+    def get_queued_items(self, limit: int = 0) -> list[DownloadItem]:
+        """Get queued items sorted by priority (lowest value first), then by added_at.
+        
+        Args:
+            limit: If > 0, return only the first N items (uses heapq for O(n + k*log(k)))
+        """
+        import heapq
         with self._lock:
             paths = self._by_status.get("queued", set())
             items = [self.state.items[p] for p in paths if p in self.state.items]
+        
+        if limit > 0 and limit < len(items):
+            return heapq.nsmallest(limit, items, key=lambda i: (i.priority, i.added_at))
+        
         items.sort(key=lambda i: (i.priority, i.added_at))
         return items
 

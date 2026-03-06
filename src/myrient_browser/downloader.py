@@ -469,7 +469,8 @@ class DownloadManager:
 
             if available_slots > 0:
                 # get_queued_items() returns items sorted by (priority, added_at)
-                queued = self.state.get_queued_items()
+                # Only fetch as many as we need to fill slots (much faster for large queues)
+                queued = self.state.get_queued_items(limit=available_slots + 10)
                 started = 0
                 for item in queued:
                     if started >= available_slots:
@@ -481,9 +482,10 @@ class DownloadManager:
                     task = asyncio.create_task(self._download_with_semaphore(item))
                     self._tasks[item.path] = task
                     started += 1
-                await asyncio.sleep(0.1)
+                # Longer sleep to reduce CPU usage with large queues
+                await asyncio.sleep(0.5 if started > 0 else 1.0)
             else:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
 
     async def _download_with_semaphore(self, item: DownloadItem) -> None:
         """Download with concurrency control."""
