@@ -941,8 +941,10 @@ class DownloadPanel(Static):
         if failed_count > 0:
             summary_parts.append(f"[red]{failed_count} failed[/]")
         
-        # Calculate total speed from all downloading items
-        total_speed = sum(i.speed for i in items if i.status == DownloadStatus.DOWNLOADING and i.speed > 0)
+        # Use pre-computed total speed from all downloading items (not just filtered page)
+        total_speed = stats.get("total_speed", 0) if stats else sum(
+            i.speed for i in items if i.status == DownloadStatus.DOWNLOADING and i.speed > 0
+        )
         
         # Format sizes - use MB if configured
         force_mb = _display_config.display.force_mb_in_downloads if _display_config else False
@@ -2131,11 +2133,15 @@ class MyrientBrowser(App):
             end = min(start + page_size, total)
             page_items = items[start:end]
 
-            # Compute sizes from stats (O(1)) instead of iterating all items
-            # We track total/downloaded only for active items (downloading)
+            # Compute sizes from all pending items (queued + downloading + paused)
+            # so Total/Remaining reflects the entire remaining workload
+            pending_items = self.state.get_active_items()
+            all_total_size = sum(i.total_size for i in pending_items if i.total_size > 0)
+            all_downloaded_size = sum(i.downloaded_size for i in pending_items)
+
+            # Total speed from all downloading items (not just filtered page)
             downloading_items = self.state.get_downloading_items()
-            all_total_size = sum(i.total_size for i in downloading_items if i.total_size > 0)
-            all_downloaded_size = sum(i.downloaded_size for i in downloading_items)
+            total_speed = sum(i.speed for i in downloading_items if i.speed > 0)
 
             # Build stats for summary
             filtered_stats = stats.copy()
@@ -2146,6 +2152,7 @@ class MyrientBrowser(App):
             filtered_stats["max_page"] = max_page
             filtered_stats["all_total_size"] = all_total_size
             filtered_stats["all_downloaded_size"] = all_downloaded_size
+            filtered_stats["total_speed"] = total_speed
 
             panel.update_downloads(page_items, filtered_stats)
 
