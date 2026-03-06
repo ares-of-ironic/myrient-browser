@@ -2140,8 +2140,15 @@ class MyrientBrowser(App):
             all_downloaded_size = sum(i.downloaded_size for i in all_items_list)
 
             # Total speed from all downloading items (not just filtered page)
+            # Keep last known speed for a few seconds so ETA doesn't flicker
             downloading_items = self.state.get_downloading_items()
-            total_speed = sum(i.speed for i in downloading_items if i.speed > 0)
+            current_speed = sum(i.speed for i in downloading_items if i.speed > 0)
+            if current_speed > 0:
+                self._last_known_speed = current_speed
+                self._last_speed_time = time.time()
+            elif hasattr(self, "_last_speed_time") and time.time() - self._last_speed_time < 5.0:
+                current_speed = self._last_known_speed
+            total_speed = current_speed
 
             # Build stats for summary
             filtered_stats = stats.copy()
