@@ -2133,11 +2133,11 @@ class MyrientBrowser(App):
             end = min(start + page_size, total)
             page_items = items[start:end]
 
-            # Compute sizes from all pending items (queued + downloading + paused)
-            # so Total/Remaining reflects the entire remaining workload
-            pending_items = self.state.get_active_items()
-            all_total_size = sum(i.total_size for i in pending_items if i.total_size > 0)
-            all_downloaded_size = sum(i.downloaded_size for i in pending_items)
+            # Compute sizes from ALL items so Remaining = Total - Downloaded works
+            # (completed items have downloaded_size == total_size, so they cancel out)
+            all_items_list = self.state.get_all_items()
+            all_total_size = sum(i.total_size for i in all_items_list if i.total_size > 0)
+            all_downloaded_size = sum(i.downloaded_size for i in all_items_list)
 
             # Total speed from all downloading items (not just filtered page)
             downloading_items = self.state.get_downloading_items()
