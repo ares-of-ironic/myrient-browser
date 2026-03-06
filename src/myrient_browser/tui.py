@@ -489,6 +489,11 @@ class _ScreensaverWidget(Widget):
         # {x, head_y, speed, chars: dict[int,str], tail_len}
         self._matrix: list[dict] = []
 
+        # Cached stats (refreshed every 2 seconds, not every frame)
+        self._cached_stats: dict = {}
+        self._cached_downloading: list = []
+        self._stats_tick = -100  # force immediate refresh
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -497,7 +502,7 @@ class _ScreensaverWidget(Widget):
         w = self.size.width or 80
         h = self.size.height or 24
         self._init_matrix(w, h)
-        self.set_interval(1 / 20, self._step)
+        self.set_interval(1 / 15, self._step)  # 15 FPS for smoother performance
 
     def _init_matrix(self, w: int, h: int) -> None:
         """Create one rain column every 2 terminal columns."""
@@ -580,10 +585,15 @@ class _ScreensaverWidget(Widget):
         # Typing animation — 1 char per 2 ticks ≈ 10 chars/s (readable pace)
         self._typed_len = min(len(self._quote), self._typed_len + 1)
 
+        # Refresh cached stats every ~2 seconds (30 ticks at 15fps)
+        if self._tick - self._stats_tick >= 30:
+            self._cached_stats = self._state.get_stats()
+            self._cached_downloading = self._state.get_downloading_items()
+            self._stats_tick = self._tick
+
         # New quote every ~20 s
         if self._tick - self._quote_tick >= 400:
-            stats = self._state.get_stats()
-            self._quote = self._pick_quote(stats)
+            self._quote = self._pick_quote(self._cached_stats)
             self._quote_tick = self._tick
             self._typed_len = 0
 
@@ -682,8 +692,8 @@ class _ScreensaverWidget(Widget):
                 buf.put(x, y, ch, style)
 
         # ── Stats box ────────────────────────────────────────────────
-        stats       = self._state.get_stats()
-        downloading = self._state.get_downloading_items()
+        stats       = self._cached_stats
+        downloading = self._cached_downloading
         bx, by      = int(self._bx), int(self._by)
         box_style   = f"bold {self._color}"
         for i, line in enumerate(self._build_box(stats, downloading)):
