@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Concurrency limits
 CONCURRENCY_MIN = 1
-CONCURRENCY_MAX = 32
+CONCURRENCY_MAX = 64
 
 # Assembly read buffer — 64 MB at a time to avoid RAM spike on huge files
 _ASSEMBLE_CHUNK = 64 * 1024 * 1024
