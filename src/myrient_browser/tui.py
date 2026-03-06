@@ -3054,9 +3054,9 @@ class MyrientBrowser(App):
         if confirmed:
             if self.downloader:
                 await self.downloader.stop()
-            self.state.save(force=True)
             if self.index:
                 self.index.stop_watcher()
+            self.state.shutdown()
             self.exit()
 
 

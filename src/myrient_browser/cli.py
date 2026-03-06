@@ -244,7 +244,7 @@ def queue(
         return await downloader.add_to_queue(expanded)
 
     added = asyncio.run(add_items())
-    state.save(force=True)
+    state.save_sync()
 
     click.echo(f"Added {added} files to queue")
 
@@ -278,7 +278,7 @@ def download(
 
     if retry_failed:
         count = state.retry_failed()
-        state.save(force=True)
+        state.save_sync()
         click.echo(f"Reset {count} failed items to queued")
 
     if all_queued or retry_failed:
@@ -324,13 +324,13 @@ def download(
                 click.echo()
             finally:
                 await downloader.stop()
-                state.save(force=True)
+                state.save_sync()
 
         try:
             asyncio.run(run_downloads())
         except KeyboardInterrupt:
             click.echo("\nDownload interrupted. Progress saved.")
-            state.save(force=True)
+            state.save_sync()
 
         stats = state.get_stats()
         click.echo(f"\nFinal: {stats['completed']} completed, {stats['failed']} failed")

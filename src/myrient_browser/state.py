@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread, Event
 from typing import Any
 
 from .config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class DownloadStatus(str, Enum):
@@ -48,9 +51,25 @@ class DownloadItem:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        data = asdict(self)
-        data["status"] = self.status.value
-        return data
+        return {
+            "path": self.path,
+            "url": self.url,
+            "local_path": self.local_path,
+            "status": self.status.value,
+            "progress": self.progress,
+            "total_size": self.total_size,
+            "downloaded_size": self.downloaded_size,
+            "speed": self.speed,
+            "eta": self.eta,
+            "error": self.error,
+            "retries": self.retries,
+            "added_at": self.added_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "expanded_from": self.expanded_from,
+            "priority": self.priority,
+            "local_size": self.local_size,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DownloadItem:
@@ -88,6 +107,9 @@ class QueueState:
 class StateManager:
     """Manages persistent state for download queue."""
 
+    # Minimum interval between disk writes (seconds)
+    _SAVE_DEBOUNCE = 5.0
+
     def __init__(self, config: Config):
         self.config = config
         self.state = QueueState()
@@ -111,6 +133,12 @@ class StateManager:
             "paused": set(),
             "already_downloaded": set(),
         }
+        # Background save thread
+        self._save_requested = Event()
+        self._save_force = False
+        self._save_thread: Thread | None = None
+        self._save_running = False
+        self._last_save_time = 0.0
 
     def _rebuild_stats(self) -> None:
         """Rebuild stats cache and status index from scratch (call while holding _lock)."""
@@ -155,11 +183,34 @@ class StateManager:
         except (json.JSONDecodeError, KeyError, TypeError):
             self.state = QueueState()
 
-    def save(self, force: bool = False) -> None:
-        """Save state to file."""
-        if not force and not self._dirty:
+    def _start_save_thread(self) -> None:
+        """Start the background save thread if not already running."""
+        if self._save_thread is not None and self._save_thread.is_alive():
             return
+        self._save_running = True
+        self._save_thread = Thread(target=self._save_loop, daemon=True, name="state-saver")
+        self._save_thread.start()
 
+    def _save_loop(self) -> None:
+        """Background thread that coalesces save requests."""
+        while self._save_running:
+            # Wait for a save request (or timeout for periodic check)
+            triggered = self._save_requested.wait(timeout=2.0)
+            if not triggered:
+                continue
+            self._save_requested.clear()
+
+            # Debounce: wait until enough time has passed since last save
+            since_last = time.time() - self._last_save_time
+            if since_last < self._SAVE_DEBOUNCE and not self._save_force:
+                # Sleep the remaining debounce time, then save
+                time.sleep(max(0, self._SAVE_DEBOUNCE - since_last))
+
+            self._save_force = False
+            self._do_save()
+
+    def _do_save(self) -> None:
+        """Perform the actual save to disk (runs in background thread)."""
         state_path = self.config.get_state_path()
         state_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -167,8 +218,33 @@ class StateManager:
             data = self.state.to_dict()
             self._dirty = False
 
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        tmp_path = state_path.with_suffix(".tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            tmp_path.replace(state_path)
+            self._last_save_time = time.time()
+        except OSError as e:
+            logger.error(f"Failed to save state: {e}")
+            tmp_path.unlink(missing_ok=True)
+
+    def save(self, force: bool = False) -> None:
+        """Request state save (non-blocking, coalesced in background thread).
+        
+        Multiple rapid save() calls are debounced into a single disk write.
+        """
+        if not force and not self._dirty:
+            return
+
+        self._start_save_thread()
+        if force:
+            self._save_force = True
+        self._save_requested.set()
+
+    def save_sync(self) -> None:
+        """Save state synchronously (for CLI/shutdown). Blocks until complete."""
+        self._dirty = True
+        self._do_save()
 
     def add_item(self, item: DownloadItem) -> None:
         """Add item to queue."""
@@ -356,3 +432,13 @@ class StateManager:
         """Check if there are pending downloads (O(1) using index)."""
         with self._lock:
             return bool(self._by_status.get("queued") or self._by_status.get("downloading"))
+
+    def shutdown(self) -> None:
+        """Stop background save thread and flush pending changes to disk."""
+        self._save_running = False
+        self._save_requested.set()  # wake the thread
+        if self._save_thread is not None and self._save_thread.is_alive():
+            self._save_thread.join(timeout=5)
+        # Final synchronous save to ensure nothing is lost
+        if self._dirty:
+            self._do_save()
