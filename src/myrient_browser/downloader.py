@@ -505,13 +505,13 @@ class DownloadManager:
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        item.status = DownloadStatus.DOWNLOADING
-        item.started_at = time.time()
+        started_at = time.time()
         self.state.update_item(
             item.path,
             status=DownloadStatus.DOWNLOADING,
-            started_at=item.started_at,
+            started_at=started_at,
         )
+        item.started_at = started_at
 
         resume_pos = 0
         if part_path.exists():
@@ -526,15 +526,15 @@ class DownloadManager:
 
                 part_path.rename(local_path)
 
-                item.status = DownloadStatus.COMPLETED
-                item.completed_at = time.time()
-                item.progress = 100.0
+                completed_at = time.time()
                 self.state.update_item(
                     item.path,
                     status=DownloadStatus.COMPLETED,
-                    completed_at=item.completed_at,
+                    completed_at=completed_at,
                     progress=100.0,
                 )
+                item.completed_at = completed_at
+                item.progress = 100.0
                 self.state.save()
 
                 if self.on_complete:
@@ -609,7 +609,6 @@ class DownloadManager:
                     return
 
             except asyncio.CancelledError:
-                item.status = DownloadStatus.PAUSED
                 self.state.update_item(item.path, status=DownloadStatus.PAUSED)
                 self.state.save()
                 raise
@@ -883,8 +882,6 @@ class DownloadManager:
         current = self.state.state.items.get(item.path)
         if current and current.status == DownloadStatus.PAUSED:
             return
-        item.status = DownloadStatus.FAILED
-        item.error = error
         self.state.update_item(
             item.path,
             status=DownloadStatus.FAILED,
