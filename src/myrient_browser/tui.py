@@ -1780,6 +1780,7 @@ class MyrientBrowser(App):
         # Start downloader immediately (doesn't need index)
         self.start_downloader()
         self.set_interval(0.5, self.update_download_panel)  # 500ms for balanced responsiveness
+        self.set_interval(1.0, self._periodic_stats_update)  # stats panel always refreshes
         # Kick off du refresh; first call is immediate, then every 15 s
         self._refresh_du()
         self.set_interval(15.0, self._refresh_du)
@@ -1998,6 +1999,13 @@ class MyrientBrowser(App):
             label = path_label
         path_display.update(label)
         self.update_stats()
+
+    def _periodic_stats_update(self) -> None:
+        """Periodic stats refresh (runs regardless of active tab)."""
+        try:
+            self.update_stats()
+        except Exception:
+            pass
 
     def update_stats(self) -> None:
         """Update statistics panel."""
