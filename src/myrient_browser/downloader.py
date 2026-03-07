@@ -140,14 +140,16 @@ class DownloadManager:
 
         # Mark QUEUED items as PAUSED before touching tasks so the queue loop
         # doesn't pick them up again between the status write and task cancel.
-        for item in self.state.get_queued_items():
+        queued = self.state.get_queued_items()
+        for i, item in enumerate(queued):
             self.state.update_item(item.path, status=DownloadStatus.PAUSED)
+            if i % 500 == 499:
+                await asyncio.sleep(0)
 
         # Mark DOWNLOADING items PAUSED first (guards _handle_failure race)
         active_paths = list(self._tasks.keys())
         for path in active_paths:
             self.state.update_item(path, status=DownloadStatus.PAUSED)
-        # Edge-case: DOWNLOADING items not yet in _tasks
         for item in self.state.get_downloading_items():
             self.state.update_item(item.path, status=DownloadStatus.PAUSED)
 
@@ -160,19 +162,22 @@ class DownloadManager:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
 
-        logger.info("Queue items paused — download loop still running for new items")
+        logger.info(f"Paused {len(queued) + len(active_paths)} items")
 
     async def resume_all(self) -> None:
         """Move all PAUSED items back to QUEUED so they resume downloading."""
         self._queue_paused = False
         logger.info("Resuming paused queue items")
 
-        for item in self.state.get_items_by_status(DownloadStatus.PAUSED):
+        paused = self.state.get_items_by_status(DownloadStatus.PAUSED)
+        for i, item in enumerate(paused):
             self.state.update_item(item.path, status=DownloadStatus.QUEUED)
+            # Yield to event loop every 500 items to keep TUI responsive
+            if i % 500 == 499:
+                await asyncio.sleep(0)
         self.state.save(force=True)
 
-        # Queue loop is already running; it will pick up QUEUED items on next tick
-        logger.info("All paused items moved back to QUEUED")
+        logger.info(f"Resumed {len(paused)} paused items")
 
     def set_concurrency(self, value: int) -> int:
         """Change the number of parallel downloads while running.
@@ -209,9 +214,9 @@ class DownloadManager:
         self._cleanup_stale_segment_files()
 
         segs = self.config.download.segments_per_file
-        # Each concurrent download may open `segs` parallel segment connections.
-        # Add a few extra for HEAD probes and retries.
-        max_conn = self._concurrency * (segs + 2) + 4
+        # Use CONCURRENCY_MAX for connection pool so set_concurrency() works
+        # without needing to recreate the client.
+        max_conn = CONCURRENCY_MAX * (segs + 2) + 4
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 self.config.download.timeout,
@@ -223,13 +228,10 @@ class DownloadManager:
                 "Accept-Encoding": "identity",  # binary files — no compression
             },
             follow_redirects=True,
-            # HTTP/2 uses a 64 KB flow-control window per stream which caps
-            # throughput to ~(64 KB / RTT).  HTTP/1.1 lets TCP manage the window
-            # (typically 4-16 MB) and matches wget/curl performance.
             http2=False,
             limits=httpx.Limits(
                 max_connections=max_conn,
-                max_keepalive_connections=self._concurrency * (segs + 1),
+                max_keepalive_connections=CONCURRENCY_MAX * (segs + 1),
             ),
         )
 
@@ -320,10 +322,11 @@ class DownloadManager:
         for path in paths:
             existing = self.state.get_item(path)
             if existing is not None:
-                # If marked as ALREADY_DOWNLOADED but the file is gone, re-queue it
-                if existing.status == DownloadStatus.ALREADY_DOWNLOADED:
+                # For ALREADY_DOWNLOADED or COMPLETED, check if file still exists
+                if existing.status in (DownloadStatus.ALREADY_DOWNLOADED, DownloadStatus.COMPLETED):
                     lp = self.config.get_local_path(path)
                     if not lp.exists():
+                        # File is gone - re-queue it
                         part = lp.with_suffix(lp.suffix + ".part")
                         part.unlink(missing_ok=True)
                         self.state.update_item(
@@ -339,7 +342,7 @@ class DownloadManager:
                     # File still on disk — count as already_present
                     already_present += 1
                 else:
-                    # QUEUED / DOWNLOADING / FAILED / PAUSED / COMPLETED — skip
+                    # QUEUED / DOWNLOADING / FAILED / PAUSED — skip
                     already_present += 1
                 continue
 
@@ -609,8 +612,11 @@ class DownloadManager:
                     return
 
             except asyncio.CancelledError:
-                self.state.update_item(item.path, status=DownloadStatus.PAUSED)
-                self.state.save()
+                # Only update status if not already paused (TUI may have set it)
+                current = self.state.state.items.get(item.path)
+                if current and current.status != DownloadStatus.PAUSED:
+                    self.state.update_item(item.path, status=DownloadStatus.PAUSED)
+                    self.state.save()
                 raise
 
     # ------------------------------------------------------------------

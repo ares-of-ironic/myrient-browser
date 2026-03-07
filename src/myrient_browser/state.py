@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -169,10 +170,20 @@ class StateManager:
         self._by_status[new_status.value].add(path)
 
     def load(self) -> None:
-        """Load state from file."""
+        """Load state from file.
+        
+        If the main state file is corrupted, attempts to load from backup.
+        """
         state_path = self.config.get_state_path()
+        backup_path = state_path.with_suffix(".json.auto_backup")
+        
         if not state_path.exists():
-            return
+            # Try backup if main file doesn't exist
+            if backup_path.exists():
+                logger.warning("Main state file missing, trying auto backup...")
+                state_path = backup_path
+            else:
+                return
 
         try:
             with open(state_path, encoding="utf-8") as f:
@@ -180,7 +191,22 @@ class StateManager:
             with self._lock:
                 self.state = QueueState.from_dict(data)
                 self._rebuild_stats()
-        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.info(f"Loaded {len(self.state.items)} items from state")
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.error(f"Failed to load state from {state_path}: {e}")
+            # Try backup
+            if backup_path.exists() and state_path != backup_path:
+                logger.warning("Trying auto backup...")
+                try:
+                    with open(backup_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    with self._lock:
+                        self.state = QueueState.from_dict(data)
+                        self._rebuild_stats()
+                    logger.info(f"Recovered {len(self.state.items)} items from backup")
+                    return
+                except (json.JSONDecodeError, KeyError, TypeError, OSError) as e2:
+                    logger.error(f"Backup also failed: {e2}")
             self.state = QueueState()
 
     def _start_save_thread(self) -> None:
@@ -210,23 +236,50 @@ class StateManager:
             self._do_save()
 
     def _do_save(self) -> None:
-        """Perform the actual save to disk (runs in background thread)."""
+        """Perform the actual save to disk (runs in background thread).
+        
+        Uses atomic write pattern: write to temp file, fsync, then rename.
+        Creates automatic backup before overwriting.
+        """
+        import shutil
+        import threading
+        
         state_path = self.config.get_state_path()
         state_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path = state_path.with_suffix(".json.auto_backup")
 
         with self._lock:
             data = self.state.to_dict()
             self._dirty = False
 
-        tmp_path = state_path.with_suffix(".tmp")
+        # Use unique tmp file name to avoid race conditions between threads
+        thread_id = threading.current_thread().ident or 0
+        tmp_path = state_path.with_name(f"{state_path.name}.{thread_id}.tmp")
         try:
+            # Write to temp file first
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            
+            # Create backup of current state before replacing (only if main file exists)
+            if state_path.exists():
+                try:
+                    shutil.copy2(state_path, backup_path)
+                except OSError:
+                    pass  # Backup failure is not critical
+            
+            # Atomic replace - this is a single syscall, safe from interruption
             tmp_path.replace(state_path)
+            
             self._last_save_time = time.time()
+            logger.debug(f"State saved: {len(data.get('items', {}))} items")
         except OSError as e:
             logger.error(f"Failed to save state: {e}")
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def save(self, force: bool = False) -> None:
         """Request state save (non-blocking, coalesced in background thread).

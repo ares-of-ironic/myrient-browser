@@ -69,6 +69,26 @@ class StateConfig:
     state_file: str = "state.json"
 
 
+@dataclass
+class NASConfig:
+    """NAS synchronization configuration."""
+
+    # Connection settings
+    host: str = "192.168.100.120"
+    user: str = "admin"
+    port: int = 22
+    ssh_key: str = ""  # Path to SSH key, empty = use default
+    
+    # Remote path where Myrient files are stored
+    remote_path: str = "/share/Archiwum/MYRIENT"
+    
+    # Verification settings
+    verify_sizes: bool = True  # Also compare file sizes, not just existence
+    
+    # Connection timeout in seconds
+    timeout: int = 30
+
+
 # Color palette definitions: (name, primary, secondary, accent, success, error, warning)
 COLOR_PALETTES: dict[str, tuple[str, str, str, str, str, str]] = {
     "default":    ("#00d7ff", "#0087d7", "#ffaf00", "#00ff00", "#ff0000", "#ffff00"),  # Cyan/Blue
@@ -111,6 +131,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     state: StateConfig = field(default_factory=StateConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    nas: NASConfig = field(default_factory=NASConfig)
     project_root: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -156,6 +177,8 @@ class Config:
             self._update_dataclass(self.state, data["state"])
         if "display" in data:
             self._update_dataclass(self.display, data["display"])
+        if "nas" in data:
+            self._update_dataclass(self.nas, data["nas"])
 
     def _load_from_env(self) -> None:
         """Load configuration from environment variables."""
@@ -287,6 +310,15 @@ class Config:
             f"force_mb_in_downloads = {_bool(self.display.force_mb_in_downloads)}",
             f"show_total_speed = {_bool(self.display.show_total_speed)}",
             f"color_palette = {_str(self.display.color_palette)}",
+            "",
+            "[nas]",
+            f"host = {_str(self.nas.host)}",
+            f"user = {_str(self.nas.user)}",
+            f"port = {self.nas.port}",
+            f"ssh_key = {_str(self.nas.ssh_key)}",
+            f"remote_path = {_str(self.nas.remote_path)}",
+            f"verify_sizes = {_bool(self.nas.verify_sizes)}",
+            f"timeout = {self.nas.timeout}",
             "",
         ]
 

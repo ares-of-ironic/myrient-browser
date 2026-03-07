@@ -260,20 +260,24 @@ class HelpScreen(ModalScreen[None]):
   [yellow]e[/yellow]           Export highlighted / selected to file
   [yellow]m[/yellow]           Toggle "show missing only" filter
   [yellow]r[/yellow]           Reload index file
+  [yellow]V[/yellow]           Verify folder on NAS  [dim](compare with remote, queue missing)[/dim]
 
 [bold]── Downloads tab ────────────────────────────[/bold]
   [yellow]/[/yellow]           Focus search input
   [yellow]Escape[/yellow]      Clear search and filters
   [yellow]][/yellow] [yellow][][/yellow]        Next / previous page  [dim](500 items/page)[/dim]
-  [yellow]1[/yellow]-[yellow]5[/yellow]         Filter: All / Queued / Active / Done / Failed
+  [yellow]1[/yellow]-[yellow]6[/yellow]         Filter: All / Queued / Active / Done / Failed / Paused
+  [yellow]o[/yellow]           Cycle sort mode  [dim](name / size / progress / added)[/dim]
   [yellow]p[/yellow]           Retry / restart selected  [dim](jumps to front of queue)[/dim]
+  [yellow]s[/yellow]           Pause selected item  [dim](queued or downloading)[/dim]
+  [yellow]v[/yellow]           Resume selected paused item  [dim](continues from where it stopped)[/dim]
   [yellow]u[/yellow]           Move selected queued item to front of queue
   [yellow]F[/yellow]           Force re-download  [dim](works for "On disk" / Done / any status)[/dim]
   [yellow]x[/yellow]           Remove selected from queue
   [yellow]f[/yellow]           Retry all failed downloads
   [yellow]k[/yellow]           Clear all completed downloads
   [yellow]X[/yellow]           Clear entire queue  [dim](confirmation required)[/dim]
-  [yellow]+[/yellow] [yellow]-[/yellow]         Increase / decrease concurrent download slots  [dim](1–32)[/dim]
+  [yellow]+[/yellow] [yellow]-[/yellow]         Increase / decrease concurrent download slots  [dim](1–64)[/dim]
   [yellow]P[/yellow]           [bold]Pause all[/bold] downloads  [dim](keeps queue intact, cancels active transfers)[/dim]
   [yellow]R[/yellow]           [bold]Resume all[/bold] paused downloads
   [yellow]T[/yellow]           [bold]Clear throttle[/bold]  [dim](skip remaining Rate-limited wait — at your own risk)[/dim]
@@ -856,6 +860,161 @@ class ExportDialog(ModalScreen[tuple[str, str] | None]):
         self.dismiss(None)
 
 
+class NASVerifyProgressDialog(ModalScreen[None]):
+    """Dialog showing NAS verification progress."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, path: str, config: "Config") -> None:
+        super().__init__()
+        self.path = path
+        self.config = config
+        self._cancelled = False
+
+    def compose(self) -> ComposeResult:
+        with Container(id="nas-verify-dialog"):
+            yield Label("NAS Verification", id="nas-verify-title")
+            yield Static(f"[bold]Path:[/bold] {self.path}")
+            yield Static(f"[bold]NAS:[/bold] {self.config.nas.user}@{self.config.nas.host}")
+            yield Static("")
+            yield Static("", id="verify-status")
+            yield Static("", id="verify-detail")
+            yield LoadingIndicator()
+            yield Static("")
+            yield Static("[dim]Press Escape to cancel[/dim]", id="verify-hint")
+
+    def update_status(self, status: str, detail: str = "") -> None:
+        """Update progress status."""
+        try:
+            self.query_one("#verify-status", Static).update(status)
+            self.query_one("#verify-detail", Static).update(detail)
+        except Exception:
+            pass
+
+    def action_cancel(self) -> None:
+        self._cancelled = True
+        self.dismiss(None)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+
+class NASVerifyDialog(ModalScreen[dict | None]):
+    """Dialog showing NAS verification results."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("q", "cancel", "Cancel"),
+        Binding("y", "queue_missing", "Queue missing"),
+        Binding("s", "sync_local", "Sync local to NAS"),
+    ]
+
+    def __init__(self, path: str, result: "VerifyResult", config: "Config") -> None:
+        super().__init__()
+        self.path = path
+        self.result = result
+        self.config = config
+        
+        # Categorize missing files
+        self.files_to_download: list[str] = []
+        self.files_to_sync: list[str] = []
+        
+        base_path = path.strip('/')
+        for f in result.missing_files:
+            full_path = f"{base_path}/{f.path}"
+            local_path = config.get_local_path(full_path)
+            if local_path.exists() and local_path.stat().st_size > 0:
+                self.files_to_sync.append(full_path)
+            else:
+                self.files_to_download.append(full_path)
+
+    def compose(self) -> ComposeResult:
+        from .nas_verify import format_size
+
+        result = self.result
+
+        with Container(id="nas-verify-dialog"):
+            yield Label("NAS Verification Results", id="nas-verify-title")
+
+            # Summary
+            yield Static(f"[bold]Path:[/bold] {self.path}")
+            yield Static(f"[bold]NAS:[/bold] {self.config.nas.user}@{self.config.nas.host}:{self.config.nas.remote_path}")
+            yield Static("")
+
+            yield Static(f"Files in index: [cyan]{len(result.index_files):,}[/cyan]")
+            yield Static(f"Files on NAS:   [cyan]{len(result.nas_files):,}[/cyan]")
+            yield Static("")
+
+            if result.is_complete:
+                yield Static("[bold green]✓ All files present with correct sizes![/bold green]")
+            else:
+                if result.missing_files:
+                    yield Static(f"[bold red]✗ Missing on NAS:[/bold red] {len(result.missing_files):,} files ({format_size(result.total_missing_size)})")
+                    # Show breakdown
+                    if self.files_to_sync:
+                        yield Static(f"  [yellow]→ {len(self.files_to_sync):,} exist locally[/yellow] (need sync)")
+                    if self.files_to_download:
+                        yield Static(f"  [red]→ {len(self.files_to_download):,} missing locally[/red] (need download)")
+                else:
+                    yield Static("[green]✓ Missing: 0[/green]")
+
+                if result.size_mismatch_files:
+                    yield Static(f"[bold yellow]⚠ Size mismatch:[/bold yellow] {len(result.size_mismatch_files):,} files")
+                else:
+                    yield Static("[green]✓ Size mismatch: 0[/green]")
+
+                yield Static("")
+
+                # Show first few missing files
+                if result.missing_files:
+                    yield Static("[bold]Missing files (first 10):[/bold]")
+                    with ScrollableContainer(id="missing-files-list"):
+                        for f in result.missing_files[:10]:
+                            full_path = f"{self.path.strip('/')}/{f.path}"
+                            local_path = self.config.get_local_path(full_path)
+                            if local_path.exists():
+                                yield Static(f"  [yellow]●[/yellow] {f.path} ({format_size(f.size)}) [dim]local[/dim]")
+                            else:
+                                yield Static(f"  [red]●[/red] {f.path} ({format_size(f.size)})")
+                        if len(result.missing_files) > 10:
+                            yield Static(f"  [dim]... and {len(result.missing_files) - 10} more[/dim]")
+
+            yield Static("")
+
+            with Horizontal(id="nas-verify-buttons"):
+                if self.files_to_sync:
+                    yield Button(f"Sync {len(self.files_to_sync)} to NAS (s)", id="btn-sync", variant="warning")
+                if self.files_to_download:
+                    yield Button(f"Download {len(self.files_to_download)} (y)", id="btn-queue", variant="success")
+                yield Button("Close (q)", id="btn-close", variant="primary")
+
+    @on(Button.Pressed, "#btn-queue")
+    def do_queue(self) -> None:
+        self.dismiss({"action": "queue", "files": self.files_to_download})
+
+    @on(Button.Pressed, "#btn-sync")
+    def do_sync(self) -> None:
+        self.dismiss({"action": "sync", "files": self.files_to_sync})
+
+    @on(Button.Pressed, "#btn-close")
+    def do_close(self) -> None:
+        self.dismiss(None)
+
+    def action_queue_missing(self) -> None:
+        if self.files_to_download:
+            self.dismiss({"action": "queue", "files": self.files_to_download})
+
+    def action_sync_local(self) -> None:
+        if self.files_to_sync:
+            self.dismiss({"action": "sync", "files": self.files_to_sync})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class DownloadPanel(Static):
     """Panel showing download progress with management controls."""
 
@@ -877,7 +1036,7 @@ class DownloadPanel(Static):
         with Horizontal(id="download-filter-row"):
             yield Input(placeholder="Search downloads... (/)", id="download-search")
             yield Static(
-                "[1]All [2]Queued/Paused [3]Active [4]Done [5]Failed",
+                "[1]All [2]Queued [3]Active [4]Done [5]Failed [6]Paused",
                 id="download-filter-buttons",
             )
         yield Static("", id="download-summary")
@@ -886,8 +1045,48 @@ class DownloadPanel(Static):
 
     def on_mount(self) -> None:
         table = self.query_one("#download-table", DataTable)
-        table.add_columns("Status", "File", "Size", "Progress", "Speed", "ETA", "Error")
+        # Add columns with keys for later updates
+        table.add_column("[dim]Status[/]", key="status")
+        table.add_column("File", key="file")
+        table.add_column("Size", key="size")
+        table.add_column("Progress", key="progress")
+        table.add_column("[dim]Speed[/]", key="speed")
+        table.add_column("ETA", key="eta")
+        table.add_column("[dim]Error[/]", key="error")
         table.cursor_type = "row"
+
+    def _update_table_header(self, sort_mode: str = "default") -> None:
+        """Update table header with sort indicator in DataTable columns."""
+        try:
+            table = self.query_one("#download-table", DataTable)
+            
+            # Column definitions: (key, name, sort_key) - sortable columns have sort_key
+            columns = [
+                ("status", "Status", None),
+                ("file", "File", "name"),
+                ("size", "Size", "size"),
+                ("progress", "Progress", "progress"),
+                ("speed", "Speed", None),
+                ("eta", "ETA", "added"),
+                ("error", "Error", None),
+            ]
+            
+            for col_key, name, sort_key in columns:
+                col = table.columns.get(col_key)
+                if col is None:
+                    continue
+                    
+                if sort_key and sort_mode.startswith(sort_key):
+                    arrow = "↓" if sort_mode.endswith("_desc") else "↑"
+                    col.label = f"[bold cyan]{name}{arrow}[/]"
+                elif sort_key:
+                    col.label = name
+                else:
+                    col.label = f"[dim]{name}[/]"
+            
+            table.refresh()
+        except Exception:
+            pass
 
     def update_downloads(self, items: list[DownloadItem], stats: dict[str, int] | None = None) -> None:
         """Update download list without losing cursor position.
@@ -927,33 +1126,55 @@ class DownloadPanel(Static):
             total_size = sum(i.total_size for i in items if i.total_size > 0)
             downloaded_size = sum(i.downloaded_size for i in items)
         
-        # Update summary
+        # Update summary - LINE 1: status counts and pagination
         remaining = total_size - downloaded_size
-        summary_parts = []
-        if queued_count > 0:
-            summary_parts.append(f"[dim]{queued_count} queued[/]")
-        if paused_count > 0:
-            summary_parts.append(f"[yellow]{paused_count} paused[/]")
-        if downloading_count > 0:
-            summary_parts.append(f"[blue]{downloading_count} downloading[/]")
-        if completed_count > 0:
-            summary_parts.append(f"[green]{completed_count} done[/]")
-        if failed_count > 0:
-            summary_parts.append(f"[red]{failed_count} failed[/]")
+        line1_parts = []
         
-        # Use pre-computed total speed from all downloading items (not just filtered page)
-        total_speed = stats.get("total_speed", 0) if stats else sum(
-            i.speed for i in items if i.status == DownloadStatus.DOWNLOADING and i.speed > 0
-        )
+        # Pagination info first
+        filtered_count = stats.get("filtered", len(items)) if stats else len(items)
+        page = (stats.get("page", 0) if stats else 0) + 1
+        max_page = (stats.get("max_page", 0) if stats else 0) + 1
+        page_start = stats.get("page_start", 0) + 1 if stats else 1
+        page_end = stats.get("page_end", len(items)) if stats else len(items)
+
+        if filtered_count < total_count:
+            line1_parts.append(f"[yellow]Filtered {filtered_count}/{total_count}[/]")
+
+        if filtered_count > len(items):
+            line1_parts.append(
+                f"[dim]{page_start}-{page_end}/{filtered_count}, "
+                f"str. {page}/{max_page}  "
+                f"[cyan]][/cyan] nast.  [cyan]\\[[/cyan] poprz.[/dim]"
+            )
+        
+        # Status counts
+        if queued_count > 0:
+            line1_parts.append(f"[dim]{queued_count} queued[/]")
+        if paused_count > 0:
+            line1_parts.append(f"[yellow]{paused_count} paused[/]")
+        if downloading_count > 0:
+            line1_parts.append(f"[blue]{downloading_count} downloading[/]")
+        if completed_count > 0:
+            line1_parts.append(f"[green]{completed_count} done[/]")
+        if failed_count > 0:
+            line1_parts.append(f"[red]{failed_count} failed[/]")
+        
+        # LINE 2: Total, Remaining, Speed, ETA
+        line2_parts = []
         
         # Format sizes - use MB if configured
         force_mb = _display_config.display.force_mb_in_downloads if _display_config else False
         size_formatter = format_size_mb if force_mb else format_size
         
         if total_size > 0:
-            summary_parts.append(f"Total: {size_formatter(total_size)}")
+            line2_parts.append(f"Total: {size_formatter(total_size)}")
             if remaining > 0:
-                summary_parts.append(f"Remaining: {size_formatter(remaining)}")
+                line2_parts.append(f"Remaining: {size_formatter(remaining)}")
+        
+        # Use pre-computed total speed from all downloading items (not just filtered page)
+        total_speed = stats.get("total_speed", 0) if stats else sum(
+            i.speed for i in items if i.status == DownloadStatus.DOWNLOADING and i.speed > 0
+        )
         
         # Show total speed and ETA if configured and there are active downloads
         show_speed = _display_config.display.show_total_speed if _display_config else True
@@ -962,36 +1183,17 @@ class DownloadPanel(Static):
             if remaining > 0:
                 eta_seconds = remaining / total_speed
                 speed_str += f" [dim](ETA: {format_eta(eta_seconds)})[/dim]"
-            summary_parts.append(speed_str)
+            line2_parts.append(speed_str)
         
-        # Show page / filtered / total info
-        filtered_count = stats.get("filtered", len(items)) if stats else len(items)
-        page = (stats.get("page", 0) if stats else 0) + 1
-        max_page = (stats.get("max_page", 0) if stats else 0) + 1
-        page_start = stats.get("page_start", 0) + 1 if stats else 1
-        page_end = stats.get("page_end", len(items)) if stats else len(items)
-
-        if filtered_count < total_count:
-            page_info = f"[yellow]Filtered {filtered_count}/{total_count}[/]"
+        # Build final summary - always two lines for consistent layout
+        line1 = " | ".join(line1_parts) if line1_parts else "[dim]No items[/dim]"
+        line2 = " | ".join(line2_parts) if line2_parts else ""
+        
+        if line2:
+            new_summary = f"{line1}\n{line2}"
         else:
-            page_info = None
-
-        if filtered_count > len(items):
-            pag_info = (
-                f"[dim]{page_start}-{page_end}/{filtered_count}, "
-                f"str. {page}/{max_page}  "
-                f"[cyan]][/cyan] nast.  [cyan]\\[[/cyan] poprz.[/dim]"
-            )
-            if page_info:
-                summary_parts.insert(0, pag_info)
-                summary_parts.insert(0, page_info)
-            else:
-                summary_parts.insert(0, pag_info)
-        elif page_info:
-            summary_parts.insert(0, page_info)
+            new_summary = f"{line1}\n[dim]—[/dim]"
         
-        # Only update summary if changed
-        new_summary = " | ".join(summary_parts) if summary_parts else "No downloads"
         if new_summary != self._last_summary:
             summary_widget.update(new_summary)
             self._last_summary = new_summary
@@ -1553,6 +1755,39 @@ class MyrientBrowser(App):
         margin-right: 1;
     }
 
+    #nas-verify-dialog {
+        width: 80;
+        height: auto;
+        max-height: 80%;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+
+    #nas-verify-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #missing-files-list {
+        height: auto;
+        max-height: 15;
+        margin: 1 0;
+        padding: 0 1;
+        background: $surface-darken-1;
+    }
+
+    #nas-verify-buttons {
+        height: auto;
+        padding-top: 1;
+        align: center middle;
+    }
+
+    #nas-verify-buttons Button {
+        margin: 0 1;
+    }
+
     TabbedContent {
         height: 1fr;
     }
@@ -1658,6 +1893,7 @@ class MyrientBrowser(App):
         Binding("backspace", "go_back", "Back", show=False),
         Binding("m", "toggle_missing", "Missing", show=False),
         Binding("g", "go_to_parent", "Go to folder", show=False),
+        Binding("V", "verify_nas", "Verify NAS", show=False),
         Binding("]", "next_page", "Next page", show=False, priority=True),
         Binding("[", "prev_page", "Prev page", show=False, priority=True),
         # Downloads tab
@@ -1673,6 +1909,10 @@ class MyrientBrowser(App):
         Binding("3", "filter_active", "Active", show=False),
         Binding("4", "filter_done", "Done", show=False),
         Binding("5", "filter_failed", "Failed", show=False),
+        Binding("6", "filter_paused", "Paused", show=False),
+        Binding("v", "resume_selected", "Resume selected", show=False),
+        Binding("s", "pause_selected", "Pause selected", show=False),
+        Binding("o", "cycle_sort", "Sort", show=False),
         Binding("+", "concurrency_up", "More slots", show=False),
         Binding("-", "concurrency_down", "Fewer slots", show=False),
         Binding("P", "pause_all_downloads", "Pause all", show=False),
@@ -1684,6 +1924,7 @@ class MyrientBrowser(App):
 
     download_search_query = reactive("")
     download_status_filter = reactive("all")
+    download_sort_mode = reactive("default")  # default, name, size, progress, added
 
     show_only_missing = reactive(False)
     current_path = reactive("")
@@ -2090,10 +2331,9 @@ class MyrientBrowser(App):
             # Use indexed lookups instead of iterating through all 40k+ items
             status_filter = self.download_status_filter
             if status_filter == "queued":
-                items = (
-                    self.state.get_items_by_status(DownloadStatus.QUEUED) +
-                    self.state.get_items_by_status(DownloadStatus.PAUSED)
-                )
+                items = self.state.get_items_by_status(DownloadStatus.QUEUED)
+            elif status_filter == "paused":
+                items = self.state.get_items_by_status(DownloadStatus.PAUSED)
             elif status_filter == "active":
                 items = self.state.get_items_by_status(DownloadStatus.DOWNLOADING)
             elif status_filter == "done":
@@ -2115,13 +2355,31 @@ class MyrientBrowser(App):
                     if search_query in Path(i.path).name.lower() or search_query in i.path.lower()
                 ]
 
-            # Sort: downloading first, then queued by priority, then by added time
-            items.sort(key=lambda x: (
-                x.status != DownloadStatus.DOWNLOADING,
-                x.status != DownloadStatus.QUEUED,
-                x.priority if x.status == DownloadStatus.QUEUED else 0,
-                -x.added_at,
-            ))
+            # Sort based on selected mode
+            sort_mode = self.download_sort_mode
+            if sort_mode == "name":
+                items.sort(key=lambda x: Path(x.path).name.lower())
+            elif sort_mode == "name_desc":
+                items.sort(key=lambda x: Path(x.path).name.lower(), reverse=True)
+            elif sort_mode == "size":
+                items.sort(key=lambda x: x.total_size)
+            elif sort_mode == "size_desc":
+                items.sort(key=lambda x: x.total_size, reverse=True)
+            elif sort_mode == "progress":
+                items.sort(key=lambda x: x.progress)
+            elif sort_mode == "progress_desc":
+                items.sort(key=lambda x: x.progress, reverse=True)
+            elif sort_mode == "added":
+                items.sort(key=lambda x: x.added_at)
+            elif sort_mode == "added_desc":
+                items.sort(key=lambda x: x.added_at, reverse=True)
+            else:  # default - downloading first, then queued by priority
+                items.sort(key=lambda x: (
+                    x.status != DownloadStatus.DOWNLOADING,
+                    x.status != DownloadStatus.QUEUED,
+                    x.priority if x.status == DownloadStatus.QUEUED else 0,
+                    -x.added_at,
+                ))
 
             # Save full filtered list for pagination
             self._download_all_items = items
@@ -2170,6 +2428,7 @@ class MyrientBrowser(App):
             filtered_stats["total_speed"] = total_speed
 
             panel.update_downloads(page_items, filtered_stats)
+            panel._update_table_header(self.download_sort_mode)
 
             # Update concurrency bar
             if self.downloader:
@@ -2557,6 +2816,230 @@ class MyrientBrowser(App):
         except Exception as e:
             self.notify(f"Export failed: {e}", severity="error")
 
+    def action_verify_nas(self) -> None:
+        """Verify highlighted directory on NAS."""
+        if not self._is_browser_tab():
+            return
+        
+        # Get highlighted item (must be a directory)
+        list_view = self.query_one("#file-list", ListView)
+        if not list_view.highlighted_child or not isinstance(list_view.highlighted_child, PathItem):
+            self.notify("No item highlighted", severity="warning")
+            return
+        
+        node = list_view.highlighted_child.node
+        if not node.is_dir:
+            # Use parent directory if file is highlighted
+            path = str(Path(node.path).parent)
+            if not path or path == ".":
+                path = node.path.rsplit("/", 1)[0] if "/" in node.path else ""
+        else:
+            path = node.path
+        
+        if not path:
+            self.notify("Cannot verify root directory", severity="warning")
+            return
+        
+        self._verify_nas_path = path
+        # Show progress dialog
+        self._verify_progress_dialog = NASVerifyProgressDialog(path, self.config)
+        self.push_screen(self._verify_progress_dialog)
+        self._run_nas_verify(path)
+
+    @work(thread=True)
+    def _run_nas_verify(self, path: str) -> None:
+        """Run NAS verification in background thread."""
+        from .nas_verify import NASVerifier
+        
+        progress_dialog = getattr(self, '_verify_progress_dialog', None)
+        
+        def update_progress(status: str, detail: str = "") -> None:
+            if progress_dialog and not progress_dialog.cancelled:
+                self.call_from_thread(progress_dialog.update_status, status, detail)
+        
+        try:
+            update_progress("[cyan]Connecting to NAS...[/cyan]")
+            
+            verifier = NASVerifier(self.config, self.index)
+            
+            # Test connection
+            success, message = verifier.test_connection()
+            if not success:
+                self.call_from_thread(self._close_progress_and_notify, f"NAS connection failed: {message}", "error")
+                return
+            
+            if progress_dialog and progress_dialog.cancelled:
+                return
+            
+            update_progress("[cyan]Reading index files...[/cyan]")
+            
+            # Define progress callback
+            def progress_callback(stage: str, current: int, total: int) -> None:
+                if progress_dialog and progress_dialog.cancelled:
+                    return
+                if stage == "index":
+                    update_progress("[cyan]Reading index files...[/cyan]")
+                elif stage == "nas":
+                    update_progress(
+                        "[cyan]Listing files on NAS...[/cyan]",
+                        f"[dim]Index contains {total:,} files[/dim]"
+                    )
+                elif stage == "compare":
+                    update_progress(
+                        "[cyan]Comparing files...[/cyan]",
+                        f"[dim]{total:,} files to check[/dim]"
+                    )
+            
+            # Run verification
+            result = verifier.verify(path, progress_callback=progress_callback)
+            
+            if progress_dialog and progress_dialog.cancelled:
+                return
+            
+            # Close progress dialog and show results
+            self.call_from_thread(self._show_nas_verify_result, path, result)
+            
+        except Exception as e:
+            self.call_from_thread(self._close_progress_and_notify, f"Verification failed: {e}", "error")
+
+    def _close_progress_and_notify(self, message: str, severity: str) -> None:
+        """Close progress dialog and show notification."""
+        progress_dialog = getattr(self, '_verify_progress_dialog', None)
+        if progress_dialog:
+            try:
+                self.pop_screen()
+            except Exception:
+                pass
+        self.notify(message, severity=severity)
+
+    def _show_nas_verify_result(self, path: str, result) -> None:
+        """Show NAS verification result dialog."""
+        # Close progress dialog first
+        progress_dialog = getattr(self, '_verify_progress_dialog', None)
+        if progress_dialog:
+            try:
+                self.pop_screen()
+            except Exception:
+                pass
+        
+        # Store result for queuing
+        self._verify_result = result
+        self.push_screen(NASVerifyDialog(path, result, self.config), self._handle_nas_verify_result)
+
+    def _handle_nas_verify_result(self, result: dict | None) -> None:
+        """Handle NAS verify dialog result."""
+        if result is None:
+            return
+        
+        action = result.get("action")
+        files = result.get("files", [])
+        
+        if action == "queue" and files:
+            self._do_queue_files(files)
+        elif action == "sync" and files:
+            self._sync_files_to_nas(files)
+
+    def _sync_files_to_nas(self, files: list[str]) -> None:
+        """Sync local files to NAS using rsync."""
+        if not files:
+            self.notify("No files to sync", severity="information")
+            return
+        
+        # Get the common base path for rsync
+        path = getattr(self, '_verify_nas_path', '')
+        if not path:
+            self.notify("No path to sync", severity="error")
+            return
+        
+        self.notify(f"Starting sync of {len(files)} files to NAS...", severity="information")
+        self._run_nas_sync(path, files)
+
+    @work(thread=True)
+    def _run_nas_sync(self, myrient_path: str, files: list[str]) -> None:
+        """Run rsync to sync files to NAS."""
+        import subprocess
+        
+        nas = self.config.nas
+        local_base = self.config.get_download_dir()
+        
+        # Build rsync command for the specific subdirectory
+        local_path = local_base / myrient_path
+        remote_path = f"{nas.remote_path.rstrip('/')}/{myrient_path}"
+        
+        # Build SSH command part
+        ssh_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout={nas.timeout}"
+        if nas.port != 22:
+            ssh_cmd += f" -p {nas.port}"
+        if nas.ssh_key:
+            ssh_cmd += f" -i {nas.ssh_key}"
+        
+        # Build rsync command
+        rsync_cmd = [
+            "rsync",
+            "-avz",
+            "--progress",
+            "--stats",
+            "-e", ssh_cmd,
+            f"{local_path}/",
+            f"{nas.user}@{nas.host}:{remote_path}/"
+        ]
+        
+        try:
+            result = subprocess.run(
+                rsync_cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minutes timeout
+            )
+            
+            if result.returncode == 0:
+                # Parse stats from output
+                lines = result.stdout.strip().split('\n')
+                transferred = "unknown"
+                for line in lines:
+                    if "Number of regular files transferred:" in line:
+                        transferred = line.split(":")[-1].strip()
+                        break
+                
+                self.call_from_thread(
+                    self.notify,
+                    f"Sync complete! {transferred} files transferred",
+                    severity="information"
+                )
+            else:
+                self.call_from_thread(
+                    self.notify,
+                    f"Sync failed: {result.stderr[:100]}",
+                    severity="error"
+                )
+        
+        except subprocess.TimeoutExpired:
+            self.call_from_thread(self.notify, "Sync timed out", severity="error")
+        except Exception as e:
+            self.call_from_thread(self.notify, f"Sync error: {e}", severity="error")
+
+    @work
+    async def _do_queue_files(self, files_to_queue: list[str], force: bool = False) -> None:
+        """Actually queue files (runs in async context)."""
+        try:
+            added, existing = await self.downloader.add_to_queue(files_to_queue, force=force)
+            self.state.save(force=True)
+            
+            if force:
+                self.notify(
+                    f"Queued {added} files for re-download ({existing} skipped)",
+                    severity="information"
+                )
+            else:
+                self.notify(
+                    f"Added {added} files to queue ({existing} already in queue/on disk)",
+                    severity="information"
+                )
+            self.update_stats()
+            
+        except Exception as e:
+            self.notify(f"Failed to queue files: {e}", severity="error")
+
     def action_reload_index(self) -> None:
         """Reload index from file."""
         if not self._is_browser_tab():
@@ -2654,10 +3137,11 @@ class MyrientBrowser(App):
             f = self.download_status_filter
             parts = [
                 f"[bold cyan][1]All[/]" if f == "all" else "[1]All",
-                f"[bold cyan][2]Queued/Paused[/]" if f == "queued" else "[2]Queued/Paused",
+                f"[bold cyan][2]Queued[/]" if f == "queued" else "[2]Queued",
                 f"[bold cyan][3]Active[/]" if f == "active" else "[3]Active",
                 f"[bold cyan][4]Done[/]" if f == "done" else "[4]Done",
                 f"[bold cyan][5]Failed[/]" if f == "failed" else "[5]Failed",
+                f"[bold cyan][6]Paused[/]" if f == "paused" else "[6]Paused",
             ]
             filter_widget.update(" ".join(parts))
         except Exception:
@@ -2682,6 +3166,38 @@ class MyrientBrowser(App):
     def action_filter_failed(self) -> None:
         """Show only failed downloads."""
         self._set_download_filter("failed")
+
+    def action_filter_paused(self) -> None:
+        """Show only paused downloads."""
+        self._set_download_filter("paused")
+
+    def action_cycle_sort(self) -> None:
+        """Cycle through sort modes (o key)."""
+        if not self._is_downloads_tab():
+            return
+        modes = [
+            ("default", "Default (active first)"),
+            ("name", "Name A→Z"),
+            ("name_desc", "Name Z→A"),
+            ("size", "Size ↑"),
+            ("size_desc", "Size ↓"),
+            ("progress", "Progress ↑"),
+            ("progress_desc", "Progress ↓"),
+            ("added", "Added (oldest)"),
+            ("added_desc", "Added (newest)"),
+        ]
+        current = self.download_sort_mode
+        current_idx = next((i for i, (m, _) in enumerate(modes) if m == current), 0)
+        next_idx = (current_idx + 1) % len(modes)
+        new_mode, label = modes[next_idx]
+        self.download_sort_mode = new_mode
+        self.update_download_panel(reset_page=True)
+        self._update_sort_display()
+        self.notify(f"Sort: {label}")
+
+    def _update_sort_display(self) -> None:
+        """Update sort indicator in filter display."""
+        self._update_filter_display()
 
     def action_remove_download(self) -> None:
         """Remove selected download from queue."""
@@ -2769,6 +3285,68 @@ class MyrientBrowser(App):
                     self.notify("Already queued — use [u] to move to front", severity="warning")
             else:
                 self.notify("No download selected", severity="warning")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    def action_resume_selected(self) -> None:
+        """Resume a single paused download (v key)."""
+        if not self._is_downloads_tab():
+            return
+        try:
+            panel = self.query_one("#download-panel-content", DownloadPanel)
+            item = panel.get_selected_item()
+            if not item:
+                self.notify("No download selected", severity="warning")
+                return
+            if item.status != DownloadStatus.PAUSED:
+                self.notify("Item is not paused", severity="warning")
+                return
+            self.state.update_item(item.path, status=DownloadStatus.QUEUED)
+            self.state.save(force=True)
+            self.notify(f"▶ Resumed: {Path(item.path).name}")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    async def action_pause_selected(self) -> None:
+        """Pause a single queued or downloading item (s key)."""
+        if not self._is_downloads_tab():
+            return
+        try:
+            panel = self.query_one("#download-panel-content", DownloadPanel)
+            item = panel.get_selected_item()
+            if not item:
+                self.notify("No download selected", severity="warning")
+                return
+            if item.status == DownloadStatus.PAUSED:
+                self.notify("Item is already paused", severity="warning")
+                return
+            if item.status not in (DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING):
+                self.notify("Can only pause queued or downloading items", severity="warning")
+                return
+            
+            path = item.path
+            filename = Path(path).name
+            
+            if item.status == DownloadStatus.DOWNLOADING and self.downloader:
+                # First mark as PAUSED so _download_file's CancelledError handler
+                # doesn't override with a different status
+                self.state.update_item(path, status=DownloadStatus.PAUSED)
+                
+                task = self.downloader._tasks.get(path)
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                # Remove from tasks dict to prevent race conditions
+                self.downloader._tasks.pop(path, None)
+            else:
+                # Just queued - simple status change
+                self.state.update_item(path, status=DownloadStatus.PAUSED)
+            
+            self.state.save(force=True)
+            self.notify(f"⏸ Paused: {filename}")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 

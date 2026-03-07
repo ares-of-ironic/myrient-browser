@@ -253,15 +253,22 @@ def queue(
 @click.option("--all-queued", is_flag=True, help="Download all queued items")
 @click.option("--retry-failed", is_flag=True, help="Retry failed downloads")
 @click.option("--status", is_flag=True, help="Show queue status")
+@click.option("--concurrency", "-c", type=int, default=None, help="Number of concurrent downloads (1-64)")
 @click.pass_context
 def download(
     ctx: click.Context,
     all_queued: bool,
     retry_failed: bool,
     status: bool,
+    concurrency: int | None,
 ) -> None:
     """Start downloading queued items."""
     config: Config = ctx.obj["config"]
+    
+    # Override concurrency if specified
+    if concurrency is not None:
+        concurrency = max(1, min(64, concurrency))
+        config.download.concurrency = concurrency
 
     state = StateManager(config)
     state.load()
@@ -288,9 +295,50 @@ def download(
             return
 
         click.echo(f"Starting download of {len(queued)} items...")
+        click.echo(click.style("Press 'q' + Enter to stop gracefully, or Ctrl+C twice to force quit", fg="yellow"))
         print_disclaimer()
 
+        # Flag for graceful shutdown
+        shutdown_requested = False
+        force_quit = False
+
+        def keyboard_listener():
+            """Listen for 'q' key in separate thread."""
+            nonlocal shutdown_requested, force_quit
+            import select
+            import termios
+            import tty
+            
+            # Try to set terminal to raw mode for immediate key detection
+            old_settings = None
+            try:
+                old_settings = termios.tcgetattr(sys.stdin)
+                tty.setcbreak(sys.stdin.fileno())
+            except (termios.error, AttributeError):
+                pass  # Not a TTY or Windows
+            
+            try:
+                while not shutdown_requested and not force_quit:
+                    # Check if input is available (with timeout)
+                    if select.select([sys.stdin], [], [], 0.5)[0]:
+                        try:
+                            ch = sys.stdin.read(1)
+                            if ch.lower() == 'q':
+                                shutdown_requested = True
+                                click.echo(click.style("\n\n[q] Graceful shutdown requested... waiting for active downloads.", fg="yellow"))
+                                break
+                        except (IOError, OSError):
+                            break
+            finally:
+                if old_settings:
+                    try:
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                    except termios.error:
+                        pass
+
         async def run_downloads() -> None:
+            nonlocal shutdown_requested, force_quit
+            
             def on_progress(item):
                 pass
 
@@ -307,29 +355,65 @@ def download(
                 on_error=on_error,
             )
 
+            # Handle signals gracefully
+            import signal
+            
+            def signal_handler(signum, frame):
+                nonlocal shutdown_requested, force_quit
+                if shutdown_requested:
+                    click.echo("\n\nForce quit - saving state...")
+                    force_quit = True
+                    state.save_sync()
+                    sys.exit(1)
+                shutdown_requested = True
+                click.echo(click.style("\n\n[Ctrl+C] Graceful shutdown... press again to force quit.", fg="yellow"))
+            
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+
             try:
                 await downloader.start()
 
-                while state.has_pending:
+                last_completed = 0
+                while state.has_pending and not shutdown_requested:
                     await asyncio.sleep(1)
                     stats = state.get_stats()
+                    
+                    # Show progress on same line
                     click.echo(
                         f"\rProgress: {stats['completed']} done, "
                         f"{stats['downloading']} active, "
                         f"{stats['queued']} queued, "
-                        f"{stats['failed']} failed",
+                        f"{stats['failed']} failed   ",
                         nl=False,
                     )
+                    
+                    # Periodic save every 100 completed files
+                    if stats['completed'] - last_completed >= 100:
+                        state.save(force=True)
+                        last_completed = stats['completed']
 
-                click.echo()
+                if shutdown_requested:
+                    click.echo("\n\nStopping downloads...")
+                else:
+                    click.echo()
             finally:
                 await downloader.stop()
+                click.echo("\nSaving state...")
                 state.save_sync()
+                click.echo(click.style("State saved successfully.", fg="green"))
+
+        # Start keyboard listener in background thread
+        import threading
+        kb_thread = threading.Thread(target=keyboard_listener, daemon=True)
+        kb_thread.start()
 
         try:
             asyncio.run(run_downloads())
         except KeyboardInterrupt:
-            click.echo("\nDownload interrupted. Progress saved.")
+            shutdown_requested = True
+            # Give a moment for graceful shutdown
+            click.echo("\nInterrupted - saving state...")
             state.save_sync()
 
         stats = state.get_stats()
@@ -368,6 +452,186 @@ def status(ctx: click.Context) -> None:
     click.echo(f"  Downloading: {stats['downloading']}")
     click.echo(f"  Completed: {stats['completed']}")
     click.echo(f"  Failed: {stats['failed']}")
+
+
+@main.command()
+@click.argument("path")
+@click.option("--queue-missing", "-q", is_flag=True, help="Add missing files to download queue")
+@click.option("--include-mismatch", "-m", is_flag=True, help="Also queue files with size mismatch")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def verify(
+    ctx: click.Context,
+    path: str,
+    queue_missing: bool,
+    include_mismatch: bool,
+    yes: bool,
+) -> None:
+    """Verify files on NAS against Myrient index.
+
+    PATH is the Myrient path to verify (e.g., "TOSEC/Commodore/C64/Games").
+
+    Compares files in the Myrient index with files on the configured NAS.
+    Shows missing files and optionally adds them to the download queue.
+
+    NAS connection is configured in config.toml under [nas] section.
+    """
+    from .nas_verify import NASVerifier, format_size
+    
+    config: Config = ctx.obj["config"]
+
+    click.echo()
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo(click.style("  NAS Verification", fg="cyan", bold=True))
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo()
+
+    # Show NAS configuration
+    click.echo(f"  NAS Host:     {config.nas.user}@{config.nas.host}:{config.nas.port}")
+    click.echo(f"  Remote Path:  {config.nas.remote_path}")
+    click.echo(f"  Myrient Path: {path}")
+    click.echo(f"  Verify Sizes: {'Yes' if config.nas.verify_sizes else 'No'}")
+    click.echo()
+
+    # Load index
+    click.echo("Loading index...", nl=False)
+    index = FileIndex(config)
+    index.load()
+    click.echo(click.style(" OK", fg="green"))
+
+    # Create verifier
+    verifier = NASVerifier(config, index)
+
+    # Test connection
+    click.echo("Testing NAS connection...", nl=False)
+    success, message = verifier.test_connection()
+    if not success:
+        click.echo(click.style(f" FAILED", fg="red"))
+        click.echo(click.style(f"  {message}", fg="red"))
+        sys.exit(1)
+    click.echo(click.style(" OK", fg="green"))
+
+    # Verify
+    click.echo("Scanning NAS files...", nl=False)
+    result = verifier.verify(path)
+    click.echo(click.style(" OK", fg="green"))
+    click.echo()
+
+    # Show results
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo(click.style("  Verification Results", fg="cyan", bold=True))
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo()
+
+    click.echo(f"  Files in index:      {len(result.index_files):,}")
+    click.echo(f"  Files on NAS:        {len(result.nas_files):,}")
+    click.echo()
+
+    if result.is_complete:
+        click.echo(click.style("  ✓ All files present with correct sizes!", fg="green", bold=True))
+        click.echo()
+        return
+
+    # Missing files
+    if result.missing_files:
+        click.echo(click.style(f"  ✗ Missing files:     {len(result.missing_files):,}", fg="red"))
+        click.echo(click.style(f"    Total size:        {format_size(result.total_missing_size)}", fg="red"))
+    else:
+        click.echo(click.style(f"  ✓ Missing files:     0", fg="green"))
+
+    # Size mismatch
+    if result.size_mismatch_files:
+        click.echo(click.style(f"  ⚠ Size mismatch:     {len(result.size_mismatch_files):,}", fg="yellow"))
+        click.echo(click.style(f"    Total size:        {format_size(result.total_mismatch_size)}", fg="yellow"))
+    else:
+        click.echo(click.style(f"  ✓ Size mismatch:     0", fg="green"))
+
+    # Extra files (info only)
+    if result.extra_files:
+        click.echo(click.style(f"  ℹ Extra on NAS:      {len(result.extra_files):,}", fg="blue"))
+
+    click.echo()
+
+    # Show sample of missing files
+    if result.missing_files:
+        click.echo(click.style("  Missing files (first 20):", fg="red"))
+        for f in result.missing_files[:20]:
+            click.echo(f"    • {f.path} ({format_size(f.size)})")
+        if len(result.missing_files) > 20:
+            click.echo(f"    ... and {len(result.missing_files) - 20} more")
+        click.echo()
+
+    # Show sample of size mismatch files
+    if result.size_mismatch_files:
+        click.echo(click.style("  Size mismatch files (first 10):", fg="yellow"))
+        for idx_file, nas_size in result.size_mismatch_files[:10]:
+            click.echo(f"    • {idx_file.path}")
+            click.echo(f"      Index: {format_size(idx_file.size)}, NAS: {format_size(nas_size)}")
+        if len(result.size_mismatch_files) > 10:
+            click.echo(f"    ... and {len(result.size_mismatch_files) - 10} more")
+        click.echo()
+
+    # Queue missing files
+    if not queue_missing:
+        click.echo("Use --queue-missing (-q) to add missing files to download queue.")
+        return
+
+    # Calculate what to queue
+    files_to_queue: list[str] = []
+    total_size = 0
+
+    for f in result.missing_files:
+        full_path = f"{path.strip('/')}/{f.path}"
+        files_to_queue.append(full_path)
+        total_size += f.size
+
+    if include_mismatch:
+        for idx_file, _ in result.size_mismatch_files:
+            full_path = f"{path.strip('/')}/{idx_file.path}"
+            if full_path not in files_to_queue:
+                files_to_queue.append(full_path)
+                total_size += idx_file.size
+
+    if not files_to_queue:
+        click.echo("No files to queue.")
+        return
+
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo(click.style("  Queue Summary", fg="cyan", bold=True))
+    click.echo(click.style("━" * 70, fg="cyan"))
+    click.echo()
+    click.echo(f"  Files to queue:  {len(files_to_queue):,}")
+    click.echo(f"  Total size:      {format_size(total_size)}")
+    click.echo()
+
+    # Confirmation
+    if not yes:
+        if not click.confirm("Add these files to download queue?"):
+            click.echo("Cancelled.")
+            return
+
+    # Add to queue
+    click.echo()
+    click.echo("Adding files to queue...", nl=False)
+
+    state = StateManager(config)
+    state.load()
+
+    downloader = DownloadManager(config, state)
+
+    async def add_files():
+        added, existing = await downloader.add_to_queue(files_to_queue)
+        return added, existing
+
+    added, existing = asyncio.run(add_files())
+    state.save_sync()
+
+    click.echo(click.style(" OK", fg="green"))
+    click.echo()
+    click.echo(f"  Added to queue:      {added:,}")
+    click.echo(f"  Already in queue:    {existing:,}")
+    click.echo()
+    click.echo(click.style("Done! Run 'myrient download --all-queued' to start downloading.", fg="green"))
 
 
 if __name__ == "__main__":

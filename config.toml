@@ -39,3 +39,15 @@ state_file = "state.json"
 [display]
 use_decimal_units = true
 du_human_readable = false
+force_mb_in_downloads = false
+show_total_speed = true
+color_palette = "neon"
+
+[nas]
+host = "192.168.100.120"
+user = "admin"
+port = 22
+ssh_key = ""
+remote_path = "/share/Archiwum/MYRIENT"
+verify_sizes = true
+timeout = 30
